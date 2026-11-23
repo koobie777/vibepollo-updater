@@ -257,7 +257,7 @@ def select_channel(releases: list[dict[str, Any]], channel: str) -> dict[str, An
 
 def numeric_version(version: str | None) -> tuple[int, int, int] | None:
     """Extract the numeric upstream version, ignoring pacman pkgrel or old suffixes."""
-    match = re.match(r"^(?:\\d+:)?v?(\\d+)\\.(\\d+)\\.(\\d+)(?:$|[.-])", version or "", re.I)
+    match = re.match(r"^(?:\d+:)?v?(\d+)\.(\d+)\.(\d+)(?:$|[.-])", version or "", re.I)
     return tuple(int(part) for part in match.groups()) if match else None
 
 
