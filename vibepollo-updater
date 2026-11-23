@@ -24,12 +24,17 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 REPO = "Nonary/Vibepollo"
 RELEASES_API = f"https://api.github.com/repos/{REPO}/releases?per_page=30"
 CACHE_DIR = Path.home() / ".cache/vibepollo-updater"
 PKG_RE = re.compile(r"^vibepollo-.+-x86_64\.pkg\.tar(\.zst|\.xz)?$", re.IGNORECASE)
+CONFLICT_LINE_RE = re.compile(r"^vibepollo:\s+(/\S+)\s+exists in filesystem\b")
+SAFE_OVERWRITE_PATH_RE = re.compile(
+    r"^/usr/(?:lib|bin|share|libexec)/[A-Za-z0-9_./-]*(?:vibepollo|vibeshine)[A-Za-z0-9_./-]*$",
+    re.IGNORECASE,
+)
 MAX_CACHED = 3
 
 DARK_STYLESHEET = """
@@ -300,7 +305,51 @@ def download_and_verify(rel: dict[str, Any], *, cache_dir: Path = CACHE_DIR, pro
     return dest
 
 
-def install_package(pkg_path: Path, *, use_pkexec: bool = True) -> tuple[int, str]:
+def parse_safe_vibepollo_conflicts(pacman_output: str) -> list[str]:
+    """Extract conflicting file paths ONLY if EVERY conflict is a safe vibepollo/vibeshine path.
+
+    Returns an empty list if there are no conflicts or if any conflicting path is outside
+    the strict `/usr/{lib,bin,share,libexec}/...vibepollo|vibeshine...` allowlist.
+    """
+    paths: list[str] = []
+    for raw_line in (pacman_output or "").splitlines():
+        line = raw_line.strip()
+        m = CONFLICT_LINE_RE.match(line)
+        if m:
+            p = m.group(1)
+            if ".." in p or not SAFE_OVERWRITE_PATH_RE.fullmatch(p):
+                return []
+            if p not in paths:
+                paths.append(p)
+        elif "exists in filesystem" in line:
+            # Another package or non-vibepollo conflict line: fail closed
+            return []
+    return paths
+
+
+def filter_unowned_conflicts(paths: list[str]) -> list[str]:
+    """Return paths ONLY if every single path is confirmed unowned by pacman (`pacman -Qo` fails)."""
+    if not paths:
+        return []
+    for p in paths:
+        try:
+            r = subprocess.run(
+                ["pacman", "-Qo", p],
+                capture_output=True, text=True, timeout=5, check=False, shell=False,
+            )
+            if r.returncode == 0:
+                return []
+        except OSError:
+            return []
+    return list(paths)
+
+
+def install_package(
+    pkg_path: Path,
+    *,
+    use_pkexec: bool = True,
+    overwrite_paths: list[str] | None = None,
+) -> tuple[int, str]:
     if not pkg_path.is_file():
         return 2, f"Package not found: {pkg_path}"
     elevator = shutil.which("pkexec") if use_pkexec else shutil.which("sudo")
@@ -308,7 +357,11 @@ def install_package(pkg_path: Path, *, use_pkexec: bool = True) -> tuple[int, st
         elevator = shutil.which("sudo") or shutil.which("pkexec")
     if not elevator:
         return 2, "Neither pkexec nor sudo was found on PATH."
-    cmd = [elevator, "pacman", "-U", "--noconfirm", str(pkg_path)]
+    cmd = [elevator, "pacman", "-U", "--noconfirm"]
+    for p in overwrite_paths or []:
+        if ".." not in p and SAFE_OVERWRITE_PATH_RE.fullmatch(p):
+            cmd.extend(["--overwrite", p.lstrip("/")])
+    cmd.append(str(pkg_path))
     r = subprocess.run(cmd, capture_output=True, text=True, check=False, shell=False)
     out = (r.stdout or "") + ("\n" + r.stderr if r.stderr else "")
     return r.returncode, out.strip()
@@ -389,26 +442,32 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
 
     class InstallWorker(QThread):
         progress = Signal(int, str)
-        finished_install = Signal(int, str)
+        finished_install = Signal(int, str, object)
 
-        def __init__(self, rel: dict[str, Any] | None, local_pkg: Path | None = None) -> None:
+        def __init__(
+            self,
+            rel: dict[str, Any] | None,
+            local_pkg: Path | None = None,
+            overwrite_paths: list[str] | None = None,
+        ) -> None:
             super().__init__()
             self._rel = rel
             self._local_pkg = local_pkg
+            self._overwrite_paths = overwrite_paths
 
         def run(self) -> None:
+            pkg = self._local_pkg
             try:
-                if self._local_pkg is not None:
-                    pkg = self._local_pkg
+                if pkg is not None:
                     self.progress.emit(50, f"Installing cached package {pkg.name}...")
                 else:
                     assert self._rel is not None
                     pkg = download_and_verify(self._rel, progress_cb=lambda p, m: self.progress.emit(p, m))
                 self.progress.emit(100, f"Running pacman -U {pkg.name} (authenticate if prompted)...")
-                rc, out = install_package(pkg, use_pkexec=True)
-                self.finished_install.emit(rc, out)
+                rc, out = install_package(pkg, use_pkexec=True, overwrite_paths=self._overwrite_paths)
+                self.finished_install.emit(rc, out, pkg)
             except Exception as exc:
-                self.finished_install.emit(1, str(exc))
+                self.finished_install.emit(1, str(exc), pkg)
 
     class UpdaterWindow(QMainWindow):
         def __init__(self) -> None:
@@ -449,7 +508,7 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             for key, desc in (
                 ("stable", "Stable — recommended everyday streaming release"),
                 ("beta", "Beta / Pre-release — release candidates when posted"),
-                ("nightly", "Nightly — bleeding-edge latest builds & fixes"),
+                ("nightly", "Nightly — bleeding-edge latest builds && fixes"),
             ):
                 row = QHBoxLayout()
                 rb = QRadioButton(desc)
@@ -475,7 +534,7 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             lay.addWidget(self.pbar)
 
             act = QHBoxLayout()
-            self.install_btn = QPushButton("Download, Verify SHA-256 & Install Selected Channel")
+            self.install_btn = QPushButton("Download, Verify SHA-256 && Install Selected Channel")
             self.install_btn.setObjectName("PrimaryBtn")
             self.install_btn.setEnabled(False)
             self.install_btn.clicked.connect(self.start_install)
@@ -599,7 +658,7 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             w.finished_install.connect(self._on_install_done)
             w.start()
 
-        def _on_install_done(self, rc: int, out: str) -> None:
+        def _on_install_done(self, rc: int, out: str, pkg: Any) -> None:
             self.refresh_btn.setEnabled(True)
             self._refresh_local_state()
             self._update_preview()
@@ -607,8 +666,22 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             if rc == 0:
                 self.pbar.setValue(100)
                 self.status_lbl.setText(f"Installed vibepollo {installed_version()} successfully.")
-            else:
-                self.status_lbl.setText(f"Install exited with code {rc} (see log above).")
+                return
+            safe_conflicts = filter_unowned_conflicts(parse_safe_vibepollo_conflicts(out))
+            if safe_conflicts and isinstance(pkg, Path) and pkg.is_file():
+                listing = "\n".join(f"  - {p}" for p in safe_conflicts)
+                ans = QMessageBox.question(
+                    self,
+                    "Resolve Unowned Vibepollo File Conflict?",
+                    "pacman reported untracked Vibepollo/Vibeshine file(s) not owned by any package:\n\n"
+                    f"{listing}\n\n"
+                    "This commonly happens when switching between Vibepollo Stable and Nightly.\n"
+                    "Retry with scoped --overwrite for ONLY these exact unowned files?",
+                )
+                if ans == QMessageBox.Yes:
+                    self._run_worker(InstallWorker(rel=None, local_pkg=pkg, overwrite_paths=safe_conflicts))
+                    return
+            self.status_lbl.setText(f"Install exited with code {rc} (see log above).")
 
     win = UpdaterWindow()
     if smoke_offscreen:
@@ -629,6 +702,7 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--update", choices=("stable", "beta", "nightly"), help="download, verify SHA-256 & install channel in CLI")
     mode.add_argument("--rollback", action="store_true", help="reinstall newest cached fallback package")
     mode.add_argument("--smoke-offscreen", action="store_true", help="headless Qt GUI verification")
+    parser.add_argument("--overwrite-unowned", action="store_true", help="in CLI --update/--rollback, retry scoped --overwrite for unowned vibepollo/vibeshine file conflicts")
     ns = parser.parse_args(argv)
 
     if ns.check or ns.json:
@@ -641,6 +715,19 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         pkg = download_and_verify(rel, progress_cb=lambda p, m: print(f"[{p:3d}%] {m}"))
         rc, out = install_package(pkg, use_pkexec=False)
+        if rc != 0:
+            safe = filter_unowned_conflicts(parse_safe_vibepollo_conflicts(out))
+            if safe and ns.overwrite_unowned:
+                print(f"Retrying with scoped --overwrite for unowned Vibepollo files: {', '.join(safe)}")
+                rc, out = install_package(pkg, use_pkexec=False, overwrite_paths=safe)
+            elif safe:
+                print(out)
+                print(
+                    f"\nHint: Unowned Vibepollo file conflict detected ({', '.join(safe)}).\n"
+                    f"Re-run with: vibepollo-updater --update {ns.update} --overwrite-unowned",
+                    file=sys.stderr,
+                )
+                return rc
         print(out)
         return rc
     if ns.rollback:

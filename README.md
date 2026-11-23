@@ -13,6 +13,7 @@ Instead of manually hunting through GitHub releases and running `pacman -U` by h
   - **Beta / Pre-release** — release candidates & beta builds whenever posted upstream.
   - **Nightly** — latest Nightly build with bleeding-edge fixes.
 - **Mandatory SHA-256 Verification:** Checks every downloaded `vibepollo-*-x86_64.pkg.tar.zst` against the official GitHub release digest before invoking `pacman -U` (refuses to install and deletes the temp file on mismatch).
+- **Smart Channel-Switch Conflict Handling:** When switching between Stable and Nightly (for example, an untracked `/usr/lib/libvibeshine-kwin-gpu.so` left behind by an earlier build), detects unowned `vibepollo`/`vibeshine` files via `pacman -Qo` and offers a strictly scoped `--overwrite` for ONLY those exact unowned files (never blind `--overwrite '*'`).
 - **1-Click Rollback:** Automatically caches the last 3 verified `.pkg.tar.zst` packages in `~/.cache/vibepollo-updater/` so switching back from a Nightly takes one click (or one command).
 - **Clean Native Elevation:** Uses `pkexec pacman -U` in GUI mode (standard Polkit / KDE / GNOME password prompt) and `sudo pacman -U` in CLI mode — never runs an unpinned remote shell script and never touches system files until you confirm.
 - **Desktop + CLI Parity:** Use the dark-themed PySide6 GUI from your app menu/Desktop, or run headless from any terminal with `--check`, `--json`, `--update`, and `--rollback`.

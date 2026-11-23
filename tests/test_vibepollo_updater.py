@@ -134,6 +134,26 @@ class VibepolloUpdaterTests(unittest.TestCase):
             )
             self.assertTrue(keep_other.exists())
 
+    def test_parse_safe_vibepollo_conflicts_allows_only_vibepollo_vibeshine_paths(self) -> None:
+        m = _load_mod()
+        good_out = (
+            "error: failed to commit transaction (conflicting files)\n"
+            "vibepollo: /usr/lib/libvibeshine-kwin-gpu.so exists in filesystem\n"
+            "Errors occurred, no packages were upgraded.\n"
+        )
+        self.assertEqual(
+            m.parse_safe_vibepollo_conflicts(good_out),
+            ["/usr/lib/libvibeshine-kwin-gpu.so"],
+        )
+        # Must fail closed if ANY conflicting file is outside vibepollo/vibeshine or traverses ..
+        for bad_out in (
+            "vibepollo: /usr/lib/libc.so.6 exists in filesystem\n",
+            "vibepollo: /etc/vibepollo.conf exists in filesystem\n",
+            "vibepollo: /usr/lib/../etc/vibepollo exists in filesystem\n",
+            "vibepollo: /usr/lib/libvibeshine-kwin-gpu.so exists in filesystem\notherpkg: /usr/bin/foo exists in filesystem\n",
+        ):
+            self.assertEqual(m.parse_safe_vibepollo_conflicts(bad_out), [], bad_out)
+
 
 if __name__ == "__main__":
     unittest.main()
