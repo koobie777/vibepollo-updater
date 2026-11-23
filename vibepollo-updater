@@ -27,11 +27,13 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 REPO = "Nonary/Vibepollo"
 RELEASES_API = f"https://api.github.com/repos/{REPO}/releases?per_page=100"
 CACHE_DIR = Path.home() / ".cache/vibepollo-updater"
+VIBEPOLLO_DESKTOP_SRC = Path("/usr/share/applications/io.github.Nonary.vibepollo.desktop")
+VIBEPOLLO_DESKTOP_ICON = Path.home() / "Desktop" / "io.github.Nonary.vibepollo.desktop"
 PKG_RE = re.compile(r"^vibepollo-.+-x86_64\.pkg\.tar(\.zst|\.xz)?$", re.IGNORECASE)
 CONFLICT_LINE_RE = re.compile(r"^vibepollo:\s+(/\S+)\s+exists in filesystem\b")
 SAFE_OVERWRITE_PATH_RE = re.compile(
@@ -404,6 +406,22 @@ def filter_unowned_conflicts(paths: list[str]) -> list[str]:
     return list(paths)
 
 
+def vibepollo_desktop_icon(state: str | None = None, *, src: Path = VIBEPOLLO_DESKTOP_SRC,
+                           dst: Path = VIBEPOLLO_DESKTOP_ICON) -> bool:
+    """Optional Vibepollo launcher on the Desktop. state 'on'/'off' changes it; returns whether it is there."""
+    if state == "on":
+        if not src.is_file():
+            raise FileNotFoundError(f"{src} not found: install Vibepollo first")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        # Upstream writes "Icon=apollo.svg"; the icon spec wants the bare theme name.
+        text = re.sub(r"(?m)^Icon=apollo\.svg$", "Icon=apollo", src.read_text(encoding="utf-8"))
+        dst.write_text(text, encoding="utf-8")
+        dst.chmod(0o755)
+    elif state == "off":
+        dst.unlink(missing_ok=True)
+    return dst.is_file()
+
+
 def install_package(
     pkg_path: Path,
     *,
@@ -647,6 +665,12 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             act.addWidget(self.rollback_btn)
             lay.addLayout(act)
 
+            self.icon_chk = QCheckBox("Vibepollo icon on the Desktop")
+            self.icon_chk.setChecked(vibepollo_desktop_icon())
+            self.icon_chk.setToolTip(str(VIBEPOLLO_DESKTOP_ICON))
+            self.icon_chk.toggled.connect(self._toggle_desktop_icon)
+            lay.addWidget(self.icon_chk)
+
             self.status_lbl = QLabel("Ready. No changes are made until you click Install.")
             self.status_lbl.setStyleSheet("color: #e8b84b;")
             lay.addWidget(self.status_lbl)
@@ -657,6 +681,16 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             self._refresh_local_state()
             if not smoke_offscreen:
                 self.refresh()
+
+        def _toggle_desktop_icon(self, on: bool) -> None:
+            try:
+                there = vibepollo_desktop_icon("on" if on else "off")
+                self.status_lbl.setText("Vibepollo icon added to the Desktop." if there else "Vibepollo icon removed from the Desktop.")
+            except OSError as exc:
+                self.status_lbl.setText(f"Desktop icon: {exc}")
+                self.icon_chk.blockSignals(True)
+                self.icon_chk.setChecked(vibepollo_desktop_icon())
+                self.icon_chk.blockSignals(False)
 
         def _refresh_local_state(self) -> None:
             cur = installed_version()
@@ -913,12 +947,21 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--update", choices=CHANNELS, help="download, verify SHA-256 & install channel in CLI")
     mode.add_argument("--rollback", action="store_true", help="reinstall newest cached fallback package")
     mode.add_argument("--smoke-offscreen", action="store_true", help="headless Qt GUI verification")
+    mode.add_argument("--desktop-icon", choices=("on", "off", "status"), help="optional Vibepollo launcher on the Desktop")
     parser.add_argument("--stable-only", action="store_true", help="with --list, hide pre-releases")
     parser.add_argument("--overwrite-unowned", action="store_true", help="in CLI --update/--rollback, retry scoped --overwrite for unowned vibepollo/vibeshine file conflicts")
     ns = parser.parse_args(argv)
 
     if ns.check or ns.json:
         return cli_check(as_json=ns.json)
+    if ns.desktop_icon:
+        try:
+            there = vibepollo_desktop_icon(None if ns.desktop_icon == "status" else ns.desktop_icon)
+        except OSError as exc:
+            print(exc, file=sys.stderr)
+            return 2
+        print(f"Vibepollo Desktop icon: {'on' if there else 'off'} ({VIBEPOLLO_DESKTOP_ICON})")
+        return 0
     if ns.list:
         return cli_list(include_prereleases=not ns.stable_only)
     if ns.update or ns.install_version:

@@ -2,8 +2,8 @@
 Type=Application
 Version=1.0
 Name=Vibepollo Updater
-Comment=Update Vibepollo (Stable, Beta, Nightly) with SHA-256 verification and 1-click rollback
+Comment=Update Vibepollo (Stable, Pre-release, Nightly) with SHA-256 verification and 1-click rollback
 Exec=@EXEC@
-Icon=io.github.Nonary.vibepollo
+Icon=@ICON@
 Terminal=false
 Categories=System;

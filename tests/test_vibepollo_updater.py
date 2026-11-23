@@ -186,6 +186,20 @@ class VibepolloUpdaterTests(unittest.TestCase):
         ):
             self.assertEqual(m.parse_safe_vibepollo_conflicts(bad_out), [], bad_out)
 
+    def test_vibepollo_desktop_icon_on_off_and_missing_source(self) -> None:
+        m = _load_mod()
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "io.github.Nonary.vibepollo.desktop"
+            dst = Path(td) / "Desktop" / "io.github.Nonary.vibepollo.desktop"
+            src.write_text("[Desktop Entry]\nName=Vibepollo\nIcon=apollo.svg\n", encoding="utf-8")
+            self.assertFalse(m.vibepollo_desktop_icon(src=src, dst=dst))
+            self.assertTrue(m.vibepollo_desktop_icon("on", src=src, dst=dst))
+            self.assertEqual(dst.stat().st_mode & 0o777, 0o755)
+            self.assertIn("Icon=apollo\n", dst.read_text(encoding="utf-8"))
+            self.assertFalse(m.vibepollo_desktop_icon("off", src=src, dst=dst))
+            with self.assertRaises(FileNotFoundError):
+                m.vibepollo_desktop_icon("on", src=Path(td) / "missing.desktop", dst=dst)
+
 
 if __name__ == "__main__":
     unittest.main()
