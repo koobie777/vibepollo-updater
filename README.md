@@ -37,6 +37,7 @@ This installs:
 - `~/.local/bin/vibepollo-updater`
 - `~/.local/share/applications/vibepollo-updater.desktop` (App Menu launcher using Vibepollo's official icon)
 - `~/Desktop/vibepollo-updater.desktop` (pass `./install.sh --no-desktop` to skip the Desktop shortcut)
+- Optional: a **Vibepollo** launcher on the Desktop too. `./install.sh --with-vibepollo-icon`, the *Vibepollo icon on the Desktop* box in the window, or `vibepollo-updater --desktop-icon on|off|status`. `--uninstall` leaves it; turn it off with `--desktop-icon off`.
 
 To uninstall:
 ```bash
