@@ -1,33 +1,35 @@
-# Vibepollo Installer & Updater (Arch Linux GUI + CLI)
+# VibePollo Updater
 
-A lightweight, standalone **PySide6 GUI + CLI installer and updater** for **[Nonary/Vibepollo](https://github.com/Nonary/Vibepollo)** on Arch Linux and Arch-based distros (EndeavourOS, CachyOS, Manjaro, SteamOS).
+**A little less release hunting. A lot more streaming.**
 
-Upstream's Linux beta publishes an `x86_64` pacman package and a Windows installer. It does **not** publish Debian, Fedora, AppImage, or Flatpak builds. On those distros this tool still shows every channel and version, and it refuses to install rather than fetching a package that does not exist. See [upstream's Linux install guide](https://github.com/Nonary/Vibepollo/blob/master/docs/linux/install.md).
+[![Tests](https://github.com/koobie777/vibepollo-updater/actions/workflows/ci.yml/badge.svg)](https://github.com/koobie777/vibepollo-updater/actions/workflows/ci.yml)
+[![Upstream compatibility](https://github.com/koobie777/vibepollo-updater/actions/workflows/upstream-compatibility.yml/badge.svg)](https://github.com/koobie777/vibepollo-updater/actions/workflows/upstream-compatibility.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Instead of manually hunting through GitHub releases and running `pacman -U` by hand, pick **Stable**, **Latest**, or any **specific version** (pre-releases included), inspect release notes, verify the official SHA-256 digest, and install or roll back.
+I use [VibePollo](https://github.com/Nonary/Vibepollo) on Linux for both gaming and remote desktop. I wanted a simple way to install it, try newer releases, and get back to a working version without digging through GitHub assets every time.
 
-**Upstream release model (November 2026):** VibePollo publishes numeric `2.x.x` versions across release types. The numeric tag alone does not identify stability; GitHub's `prerelease` metadata does. **Stable is time-gated** and can be numerically *older* than Latest. The updater detects this and warns before a downgrade (CLI requires `--allow-downgrade`).
+So I made one. This is an **unofficial, community-made installer and updater** for Arch Linux, with a desktop window if you want it and a CLI if you don't.
 
----
+> **Quick heads-up:** This is not part of VibePollo, and it does not modify or replace its source code. It downloads the packages published by the upstream project. Upstream can change how those packages work, so compatibility isn't guaranteed.
 
-## Features
+## What it does
 
-- **Release selection based on upstream metadata:**
-  - **Stable** — newest GitHub release *not* marked as prerelease (time-gated).
-  - **Latest** — newest published GitHub release, including prereleases.
-  - **Specific version** — install a chosen tag from the last 100 releases; toggle *Show pre-releases* to filter.
-  - **Legacy CLI aliases** — `--update prerelease` and `--update nightly` both select the newest published prerelease, regardless of tag naming. Deprecated as UI categories; `--update beta` is not supported for the new numeric release stream.
-- **Downgrade protection:** Warns in the GUI when the selected `2.x.x` version is older than the installed version. The CLI refuses unless you explicitly add `--allow-downgrade`. Intentional rollback remains available.
-- **Mandatory SHA-256 Verification:** Checks every downloaded `vibepollo-*-x86_64.pkg.tar.zst` against the official GitHub release digest before invoking `pacman -U` (also refuses missing or malformed digests).
-- **Smart Channel-Switch Conflict Handling:** When switching between Stable and Nightly (for example, an untracked `/usr/lib/libvibeshine-kwin-gpu.so` left behind by an earlier build), detects unowned `vibepollo`/`vibeshine` files via `pacman -Qo` and offers a strictly scoped `--overwrite` for ONLY those exact unowned files (never blind `--overwrite '*'`).
-- **1-Click Rollback:** Automatically caches the last 3 verified `.pkg.tar.zst` packages in `~/.cache/vibepollo-updater/` so switching back from a Nightly takes one click (or one command).
-- **Clean Native Elevation:** Uses `pkexec pacman -U` in GUI mode (standard Polkit / KDE / GNOME password prompt) and `sudo pacman -U` in CLI mode — never runs an unpinned remote shell script and never touches system files until you confirm.
-- **Desktop + CLI Parity:** Use the dark-themed PySide6 GUI from your app menu/Desktop, or run headless from any terminal with `--check`, `--json`, `--list`, `--update`, `--install-version`, and `--rollback`.
-- **Zero Extra Dependencies:** Pure Python 3 standard library for CLI mode; uses the `pyside6` package that Vibepollo itself already depends on on Arch!
+| | |
+| --- | --- |
+| **Install or update** | Pick a release and install the official Arch package. |
+| **Stable or Latest** | Stable follows upstream's non-prerelease releases; Latest follows the newest published release, including prereleases. |
+| **Choose a specific version** | Browse up to the 100 most recent GitHub releases, including older builds. |
+| **Roll back** | Reinstall a previously downloaded package from the local cache (up to three packages are kept). |
+| **See what you're getting** | Read release notes, package details, and the SHA-256 digest before installation. |
+| **Use the GUI or terminal** | PySide6 desktop app, plus a Python-standard-library CLI. |
 
----
+Nothing installs in the background. You decide when to check for updates and when to install one.
 
-## Quick Install
+## Get started
+
+You'll need an **x86_64 Arch-based Linux installation**, Python 3.10+, and `pacman`. For the GUI, you'll also need **PySide6**; package installation requires `pkexec` or `sudo`.
+
+Built around Arch Linux and EndeavourOS. Other Arch-based distributions (including CachyOS and Manjaro) may work, but haven't all been tested. SteamOS has additional system-write restrictions, so treat it as **unverified** rather than plug-and-play support. There is no Windows version of this updater yet.
 
 ```bash
 git clone https://github.com/koobie777/vibepollo-updater.git
@@ -35,94 +37,109 @@ cd vibepollo-updater
 ./install.sh
 ```
 
-This installs:
-- `~/.local/bin/vibepollo-updater`
-- `~/.local/share/applications/vibepollo-updater.desktop` (App Menu launcher using Vibepollo's official icon)
-- `~/Desktop/vibepollo-updater.desktop` (pass `./install.sh --no-desktop` to skip the Desktop shortcut)
-- Optional: a **Vibepollo** launcher on the Desktop too. `./install.sh --with-vibepollo-icon`, the *Vibepollo icon on the Desktop* box in the window, or `vibepollo-updater --desktop-icon on|off|status`. `--uninstall` leaves it; turn it off with `--desktop-icon off`.
+Open **Vibepollo Updater** from your app menu, or run:
 
-To uninstall:
-```bash
-./install.sh --uninstall
-```
-
----
-
-## Usage
-
-### GUI Mode
-Launch **Vibepollo Updater** from your Application Menu or Desktop, or run:
 ```bash
 vibepollo-updater
 ```
 
-### CLI Mode
+The installer places the updater in `~/.local/bin`, adds an application-menu entry, and creates a Desktop shortcut if `~/Desktop` exists. To skip that shortcut, use `./install.sh --no-desktop`. There's also an optional VibePollo Desktop launcher: `./install.sh --with-vibepollo-icon`.
+
+To remove **this updater** (not VibePollo):
+
 ```bash
-# Compare installed Vibepollo against Stable and Latest (including downgrade indicators)
+./install.sh --uninstall
+```
+
+The uninstall command leaves your cached packages alone.
+
+## Which release should I choose?
+
+VibePollo's developer changed its release structure in November 2026. Releases now use numeric versions such as `2.x.x` across release types, rather than relying on `-stable`, `-beta`, or `-nightly` suffixes.
+
+- **Stable:** the latest upstream GitHub release **not marked prerelease**. Upstream holds this back to allow changes to settle.
+- **Latest:** the newest published release, even if GitHub marks it prerelease.
+- **Specific version:** choose a particular tag from the recent release list.
+
+**Important:** A time-gated Stable release can have a *lower version number* than the newest prerelease. Switching from Latest back to Stable may therefore be a **downgrade**. The GUI warns you, and the CLI asks for an explicit `--allow-downgrade`.
+
+The updater reads GitHub's release metadata instead of trying to guess the channel from a filename. If upstream changes how its releases are published, we may need to adjust it.
+
+## Terminal cheatsheet
+
+```bash
+# See the installed version, current releases, and potential downgrades
 vibepollo-updater --check
 
-# Machine-readable JSON output
+# Get the same information as JSON
 vibepollo-updater --json
 
-# Download, verify SHA-256, and install a channel
+# Install from either release selection
 vibepollo-updater --update stable
 vibepollo-updater --update latest
-vibepollo-updater --update prerelease  # legacy alias for latest pre-release
-vibepollo-updater --update nightly     # same legacy alias
 
-# Only when deliberately switching to an older numeric version:
-vibepollo-updater --update stable --allow-downgrade
+# Pick a specific release
+vibepollo-updater --list
+vibepollo-updater --install-version 2.20.1
 
-# Roll back to the most recent cached package
+# Show only non-prerelease releases
+vibepollo-updater --list --stable-only
+
+# Go back to your most recent locally cached package
 vibepollo-updater --rollback
 
-# Every release, pre-releases included (add --stable-only to hide them)
-vibepollo-updater --list
-
-# Install one specific release, stable or pre-release
-vibepollo-updater --install-version 2.20.1
+# Only if you really intend to install an older numeric version
+vibepollo-updater --update stable --allow-downgrade
 ```
 
-### Example `--check` Output
-```text
-Vibepollo Installed : 2.20.1-1 (controller=active · host=active)
-Upstream Repo       : https://github.com/Nonary/Vibepollo
-  stable    : 2.18.9       [stable]  (2026-11-19, 183.0 MiB)  [OLDER THAN INSTALLED]
-  latest    : 2.23.1       [pre-release]  (2026-11-23, 183.3 MiB)
-Older and specific versions: vibepollo-updater --list
-```
+For compatibility with older scripts, `--update prerelease` and `--update nightly` still select the newest GitHub prerelease. Their names are **legacy aliases**, not separate modern release channels.
 
----
+## A few safety rails
 
-## How Safety & Verification Work
+- **Official downloads:** Looks up releases from [Nonary/Vibepollo](https://github.com/Nonary/Vibepollo) and downloads their published Arch package over HTTPS.
+- **Checksums before installation:** Requires a valid SHA-256 digest from GitHub release metadata and checks each downloaded package against it before invoking `pacman`. That checks the download against the metadata; it is **not** an independent signature or audit of upstream.
+- **Local permission prompt:** Installs through `pkexec` (GUI) or `sudo` (CLI). No downloaded shell scripts are run.
+- **Scoped conflict handling:** Can offer a narrowly targeted overwrite for VibePollo/VibeShine files confirmed to be unowned by another pacman package. No blanket `--overwrite '*'`.
+- **No surprise updates:** No daemon, auto-updater, or hidden installation task.
 
-1. **HTTPS + Official Upstream Only:** Queries `https://api.github.com/repos/Nonary/Vibepollo/releases` directly and refuses non-HTTPS asset URLs.
-2. **No Shell Execution:** Every `pacman` and `systemctl` call uses strict argv lists (`shell=False`).
-3. **SHA-256 Check Before Elevation:** Requires an official 64-digit SHA-256 `digest`, downloads to a `.part` temporary file, verifies before caching, and only then asks for elevation via `pkexec` / `sudo`.
-4. **No Background Daemons or Auto-Updates:** Only runs when you explicitly open it or invoke it from the terminal. The window stays open while a check or install is running, and a close mid-job is ignored so the worker thread is not destroyed.
+Cached rollback packages were verified **when downloaded**. This is a convenience feature, not a substitute for a system snapshot or a full recovery plan.
 
----
+### What about other distros?
 
-## Requirements
+Right now upstream publishes an Arch `x86_64` package, not `.deb`, `.rpm`, AppImage, or Flatpak builds for Linux. The updater can show release information elsewhere, but **won't pretend an incompatible package is installable**.
 
-- Arch Linux / EndeavourOS / CachyOS / Manjaro (`x86_64`, `pacman`)
-- Python 3.10+
-- `pyside6` (for GUI mode; already installed as a dependency of `vibepollo`)
-- `polkit` (`pkexec`) or `sudo`
+## Keeping up with upstream
 
----
+Fair question: *what happens if VibePollo changes something?*
 
-## Development & Tests
+This helper depends on upstream's release format, so breakage is possible. Here's the approach:
+
+1. The normal [CI tests](https://github.com/koobie777/vibepollo-updater/actions/workflows/ci.yml) cover parsing, version selection, checksum handling, and other logic without installing packages.
+2. A separate [scheduled compatibility check](https://github.com/koobie777/vibepollo-updater/actions/workflows/upstream-compatibility.yml) checks **live upstream GitHub release metadata** twice a week. It downloads **no packages**, changes **no machines**, and can flag release-format drift.
+3. Actual pacman installation, graphics integration, and runtime behavior still need **real Linux testing**. A green metadata check isn't proof that a release will work on every distribution.
+
+If something breaks, open an [issue](https://github.com/koobie777/vibepollo-updater/issues) with your distro, updater command/version, the VibePollo release tag, and a short error log. Please remove any private paths or tokens before posting logs.
+
+I plan to keep using VibePollo, and I'll keep improving this little helper as I learn what people need. Suggestions and pull requests are welcome. No grand promises about every distro or every future upstream change—just a useful tool that's worth maintaining.
+
+## For anyone who wants to tinker
 
 ```bash
 python3 -m unittest discover -s tests -v
 QT_QPA_PLATFORM=offscreen ./vibepollo-updater --smoke-offscreen
+
+# Live upstream metadata check (needs network; does not install anything)
+python3 tests/upstream_contract.py
 ```
+
+The last command is also what the scheduled compatibility workflow runs.
+
+## Credits & license
+
+VibePollo belongs to the [upstream project and its contributors](https://github.com/Nonary/Vibepollo). This is an **independent helper**, not an official VibePollo release or a request for upstream to maintain it.
+
+The updater is licensed under the [MIT License](LICENSE). VibePollo is distributed under its own upstream license.
 
 ---
 
-## Disclaimer & License
-
-This is an unofficial community helper utility for **[Nonary/Vibepollo](https://github.com/Nonary/Vibepollo)**. Vibepollo itself is owned and maintained by its upstream developers under GPL-3.0-only.
-
-This updater tool is licensed under the **MIT License** — see [LICENSE](LICENSE).
+*Built for my Linux workflow. Shared in case it makes yours a little easier, too.*
