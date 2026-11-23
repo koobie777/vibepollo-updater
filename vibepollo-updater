@@ -1,0 +1,658 @@
+#!/usr/bin/env python3
+"""Vibepollo Updater — Stable, Beta & Nightly GUI/CLI updater with SHA-256 verification and 1-click rollback.
+
+Built for Arch Linux and Arch-based distributions (EndeavourOS, CachyOS, Manjaro, SteamOS/Arch)
+running Vibepollo (https://github.com/Nonary/Vibepollo).
+
+- Checks official GitHub releases across Stable, Beta/Pre-release, and Nightly channels.
+- Matches the official x86_64 Arch package (`vibepollo-*-x86_64.pkg.tar.zst`).
+- Verifies the GitHub-attested SHA-256 digest before installing (refuses on mismatch).
+- Installs via `pkexec pacman -U` in GUI mode or `sudo pacman -U` in CLI mode.
+- Keeps the last 3 verified packages cached in `~/.cache/vibepollo-updater/` for 1-click rollback.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from typing import Any
+
+__version__ = "1.0.0"
+
+REPO = "Nonary/Vibepollo"
+RELEASES_API = f"https://api.github.com/repos/{REPO}/releases?per_page=30"
+CACHE_DIR = Path.home() / ".cache/vibepollo-updater"
+PKG_RE = re.compile(r"^vibepollo-.+-x86_64\.pkg\.tar(\.zst|\.xz)?$", re.IGNORECASE)
+MAX_CACHED = 3
+
+DARK_STYLESHEET = """
+QMainWindow, QWidget {
+    background-color: #0b111b;
+    color: #e6eef8;
+    font-family: "Inter", "Noto Sans", sans-serif;
+    font-size: 13px;
+}
+QFrame#ChannelCard {
+    background-color: #111a28;
+    border: 1px solid #24364e;
+    border-radius: 10px;
+    padding: 8px;
+}
+QPlainTextEdit {
+    background-color: #0e1623;
+    color: #d6e4f0;
+    border: 1px solid #22344c;
+    border-radius: 8px;
+    font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
+    font-size: 12px;
+    padding: 8px;
+}
+QPushButton {
+    background-color: #162438;
+    color: #e6eef8;
+    border: 1px solid #355276;
+    border-radius: 7px;
+    padding: 7px 14px;
+    font-weight: 600;
+}
+QPushButton:hover {
+    background-color: #1d314c;
+    border-color: #58e1e8;
+}
+QPushButton:disabled {
+    background-color: #101722;
+    color: #5c7089;
+    border-color: #1d2a3a;
+}
+QPushButton#PrimaryBtn {
+    background-color: #145369;
+    border-color: #58e1e8;
+    color: #ffffff;
+}
+QPushButton#PrimaryBtn:hover {
+    background-color: #1a6d8a;
+}
+QComboBox {
+    background-color: #111a28;
+    color: #e6eef8;
+    border: 1px solid #2a405c;
+    border-radius: 6px;
+    padding: 5px 10px;
+}
+QProgressBar {
+    background-color: #111a28;
+    border: 1px solid #24364e;
+    border-radius: 6px;
+    text-align: center;
+    color: #e6eef8;
+    height: 20px;
+}
+QProgressBar::chunk {
+    background-color: #36c5cf;
+    border-radius: 5px;
+}
+QRadioButton {
+    spacing: 8px;
+    font-weight: 500;
+}
+"""
+
+
+def installed_version() -> str | None:
+    """Return installed pacman version of `vibepollo`, or None if not installed."""
+    try:
+        r = subprocess.run(
+            ["pacman", "-Q", "vibepollo"],
+            capture_output=True, text=True, timeout=5, check=False, shell=False,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            parts = r.stdout.strip().split()
+            return parts[1] if len(parts) >= 2 else parts[0]
+    except OSError:
+        pass
+    return None
+
+
+def service_status() -> str:
+    """Return systemd status summary for Vibepollo controller & host units."""
+    try:
+        r1 = subprocess.run(
+            ["systemctl", "is-active", "vibepollo-session-controller.service"],
+            capture_output=True, text=True, timeout=5, check=False, shell=False,
+        )
+        r2 = subprocess.run(
+            ["systemctl", "is-active", "vibepollo.service"],
+            capture_output=True, text=True, timeout=5, check=False, shell=False,
+        )
+        ctrl = r1.stdout.strip() or "unknown"
+        svc = r2.stdout.strip() or "unknown"
+        return f"controller={ctrl} · host={svc}"
+    except OSError:
+        return "unknown"
+
+
+def pick_arch_asset(release: dict[str, Any]) -> dict[str, Any] | None:
+    """Find the official x86_64 Arch package asset and its SHA-256 digest."""
+    for asset in release.get("assets") or []:
+        name = str(asset.get("name") or "")
+        if PKG_RE.match(name):
+            digest = str(asset.get("digest") or "")
+            sha256 = digest.split(":", 1)[1].strip().lower() if digest.startswith("sha256:") else ""
+            return {
+                "name": name,
+                "url": str(asset.get("browser_download_url") or ""),
+                "size": int(asset.get("size") or 0),
+                "sha256": sha256,
+            }
+    return None
+
+
+def classify_channel(release: dict[str, Any]) -> str:
+    """Classify a GitHub release into 'stable', 'beta', 'nightly', or 'draft'."""
+    if release.get("draft"):
+        return "draft"
+    if not release.get("prerelease"):
+        return "stable"
+    text = f"{release.get('tag_name', '')} {release.get('name', '')}".lower()
+    if "beta" in text or re.search(r"(^|[^a-z])rc[0-9.]*", text):
+        return "beta"
+    if "nightly" in text:
+        return "nightly"
+    return "beta"
+
+
+def parse_channels(releases: list[dict[str, Any]]) -> dict[str, dict[str, Any] | None]:
+    """Select the latest release with an Arch x86_64 package for each channel."""
+    channels: dict[str, dict[str, Any] | None] = {"stable": None, "beta": None, "nightly": None}
+    for rel in releases:
+        if not isinstance(rel, dict) or rel.get("draft"):
+            continue
+        asset = pick_arch_asset(rel)
+        if not asset:
+            continue
+        ch = classify_channel(rel)
+        if ch in channels and channels[ch] is None:
+            channels[ch] = {
+                "channel": ch,
+                "tag": str(rel.get("tag_name") or ""),
+                "name": str(rel.get("name") or rel.get("tag_name") or ""),
+                "published_at": str(rel.get("published_at") or ""),
+                "html_url": str(rel.get("html_url") or ""),
+                "notes": str(rel.get("body") or "").strip()[:2000],
+                "asset": asset,
+            }
+    return channels
+
+
+def fetch_channels(timeout: float = 12.0) -> dict[str, dict[str, Any] | None]:
+    """Fetch recent releases from GitHub REST API (no auth required)."""
+    req = urllib.request.Request(
+        RELEASES_API,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": f"vibepollo-updater/{__version__}",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        releases = json.loads(resp.read().decode("utf-8", "replace"))
+    if not isinstance(releases, list):
+        raise ValueError("unexpected GitHub releases response")
+    return parse_channels(releases)
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def prune_cache(cache_dir: Path = CACHE_DIR, keep_path: Path | None = None, max_cached: int = MAX_CACHED) -> None:
+    if not cache_dir.is_dir():
+        return
+    pkgs = sorted(
+        [p for p in cache_dir.iterdir() if p.is_file() and PKG_RE.match(p.name)],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    kept = 0
+    for p in pkgs:
+        if keep_path and p.resolve() == keep_path.resolve():
+            kept += 1
+            continue
+        if kept < max_cached:
+            kept += 1
+        else:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+
+def list_cached_packages(cache_dir: Path = CACHE_DIR) -> list[Path]:
+    if not cache_dir.is_dir():
+        return []
+    return sorted(
+        [p for p in cache_dir.iterdir() if p.is_file() and PKG_RE.match(p.name)],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+
+
+def verify_file_sha256(path: Path, expected_sha256: str) -> str:
+    """Compute SHA-256 and raise ValueError if expected digest is provided and mismatches."""
+    actual = sha256_file(path)
+    exp = (expected_sha256 or "").strip().lower()
+    if exp and actual != exp:
+        raise ValueError(f"SHA-256 mismatch! expected {exp[:16]}..., got {actual[:16]}...")
+    return actual
+
+
+def download_and_verify(rel: dict[str, Any], *, cache_dir: Path = CACHE_DIR, progress_cb=None) -> Path:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    asset = rel["asset"]
+    dest = cache_dir / asset["name"]
+    expected = asset.get("sha256") or ""
+
+    if dest.is_file() and expected and sha256_file(dest) == expected:
+        if progress_cb:
+            progress_cb(100, f"Verified cached package {dest.name} (SHA-256 OK)")
+        return dest
+
+    url = asset["url"]
+    if not url.startswith("https://"):
+        raise ValueError(f"Refusing non-HTTPS download URL: {url!r}")
+
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    req = urllib.request.Request(url, headers={"User-Agent": f"vibepollo-updater/{__version__}"})
+    total = int(asset.get("size") or 0)
+    done = 0
+    with urllib.request.urlopen(req, timeout=60) as resp, tmp.open("wb") as out:
+        if not total:
+            total = int(resp.headers.get("Content-Length") or 0)
+        while True:
+            chunk = resp.read(256 * 1024)
+            if not chunk:
+                break
+            out.write(chunk)
+            done += len(chunk)
+            if progress_cb and total > 0:
+                pct = int(min(99, (done * 100) // total))
+                progress_cb(pct, f"Downloading {dest.name}: {done / (1024*1024):.1f} / {total / (1024*1024):.1f} MiB")
+
+    try:
+        actual = verify_file_sha256(tmp, expected)
+    except ValueError:
+        tmp.unlink(missing_ok=True)
+        raise
+    tmp.replace(dest)
+    prune_cache(cache_dir=cache_dir, keep_path=dest)
+    if progress_cb:
+        progress_cb(100, f"Verified {dest.name} (SHA-256 {actual[:16]}...)")
+    return dest
+
+
+def install_package(pkg_path: Path, *, use_pkexec: bool = True) -> tuple[int, str]:
+    if not pkg_path.is_file():
+        return 2, f"Package not found: {pkg_path}"
+    elevator = shutil.which("pkexec") if use_pkexec else shutil.which("sudo")
+    if not elevator:
+        elevator = shutil.which("sudo") or shutil.which("pkexec")
+    if not elevator:
+        return 2, "Neither pkexec nor sudo was found on PATH."
+    cmd = [elevator, "pacman", "-U", "--noconfirm", str(pkg_path)]
+    r = subprocess.run(cmd, capture_output=True, text=True, check=False, shell=False)
+    out = (r.stdout or "") + ("\n" + r.stderr if r.stderr else "")
+    return r.returncode, out.strip()
+
+
+def cli_check(as_json: bool = False) -> int:
+    cur = installed_version()
+    svc = service_status()
+    ch = fetch_channels()
+    cached = [p.name for p in list_cached_packages()]
+    payload = {
+        "installed": cur,
+        "service": svc,
+        "upstream": f"https://github.com/{REPO}",
+        "channels": {
+            k: (None if v is None else {
+                "tag": v["tag"],
+                "name": v["name"],
+                "published_at": v["published_at"],
+                "asset": v["asset"]["name"],
+                "size_mb": round(v["asset"]["size"] / (1024 * 1024), 1),
+                "sha256": v["asset"]["sha256"],
+            })
+            for k, v in ch.items()
+        },
+        "cached_rollbacks": cached,
+    }
+    if as_json:
+        print(json.dumps(payload, indent=2))
+        return 0
+    print(f"Vibepollo Installed : {cur or 'NOT INSTALLED'} ({svc})")
+    print(f"Upstream Repo       : https://github.com/{REPO}")
+    for key in ("stable", "beta", "nightly"):
+        v = ch.get(key)
+        if not v:
+            print(f"  {key:<8}: (no dedicated {key} release posted right now)")
+        else:
+            sz = v["asset"]["size"] / (1024 * 1024)
+            print(f"  {key:<8}: {v['tag']:<12} [{v['name']}]  ({v['published_at'][:10]}, {sz:.1f} MiB)")
+    if cached:
+        print(f"Cached for rollback : {', '.join(cached)}")
+    return 0
+
+
+def launch_gui(*, smoke_offscreen: bool = False) -> int:
+    try:
+        from PySide6.QtCore import QThread, Signal
+        from PySide6.QtWidgets import (
+            QApplication,
+            QComboBox,
+            QFrame,
+            QHBoxLayout,
+            QLabel,
+            QMainWindow,
+            QMessageBox,
+            QPlainTextEdit,
+            QProgressBar,
+            QPushButton,
+            QRadioButton,
+            QVBoxLayout,
+            QWidget,
+        )
+    except ImportError:
+        print("PySide6 is required for GUI mode (install `pyside6` via pacman). CLI mode (`--check`, `--update`) needs no GUI.", file=sys.stderr)
+        return 2
+
+    app = QApplication.instance() or QApplication(["vibepollo-updater"])
+    app.setStyleSheet(DARK_STYLESHEET)
+
+    class FetchWorker(QThread):
+        done = Signal(object, str)
+
+        def run(self) -> None:
+            try:
+                self.done.emit(fetch_channels(), "")
+            except Exception as exc:
+                self.done.emit(None, str(exc))
+
+    class InstallWorker(QThread):
+        progress = Signal(int, str)
+        finished_install = Signal(int, str)
+
+        def __init__(self, rel: dict[str, Any] | None, local_pkg: Path | None = None) -> None:
+            super().__init__()
+            self._rel = rel
+            self._local_pkg = local_pkg
+
+        def run(self) -> None:
+            try:
+                if self._local_pkg is not None:
+                    pkg = self._local_pkg
+                    self.progress.emit(50, f"Installing cached package {pkg.name}...")
+                else:
+                    assert self._rel is not None
+                    pkg = download_and_verify(self._rel, progress_cb=lambda p, m: self.progress.emit(p, m))
+                self.progress.emit(100, f"Running pacman -U {pkg.name} (authenticate if prompted)...")
+                rc, out = install_package(pkg, use_pkexec=True)
+                self.finished_install.emit(rc, out)
+            except Exception as exc:
+                self.finished_install.emit(1, str(exc))
+
+    class UpdaterWindow(QMainWindow):
+        def __init__(self) -> None:
+            super().__init__()
+            self.setWindowTitle("Vibepollo Updater — Stable · Beta · Nightly")
+            self.resize(840, 620)
+            self._channels: dict[str, dict[str, Any] | None] = {}
+            self._worker: QThread | None = None
+
+            root = QWidget()
+            self.setCentralWidget(root)
+            lay = QVBoxLayout(root)
+            lay.setContentsMargins(16, 14, 16, 14)
+            lay.setSpacing(10)
+
+            hdr = QHBoxLayout()
+            title = QLabel("VIBEPOLLO UPDATER")
+            title.setStyleSheet("color: #58e1e8; font-size: 18px; font-weight: 700;")
+            self.refresh_btn = QPushButton("Check Releases")
+            self.refresh_btn.clicked.connect(self.refresh)
+            hdr.addWidget(title)
+            hdr.addStretch(1)
+            hdr.addWidget(self.refresh_btn)
+            lay.addLayout(hdr)
+
+            self.cur_lbl = QLabel("")
+            self.cur_lbl.setStyleSheet("color: #3dd68c; font-size: 13px; font-weight: 600;")
+            lay.addWidget(self.cur_lbl)
+
+            box = QFrame()
+            box.setObjectName("ChannelCard")
+            bl = QVBoxLayout(box)
+            ch_hdr = QLabel("SELECT RELEASE CHANNEL")
+            ch_hdr.setStyleSheet("color: #8ba0b8; font-size: 11px; font-weight: 700;")
+            bl.addWidget(ch_hdr)
+            self.radios: dict[str, QRadioButton] = {}
+            self.ch_labels: dict[str, QLabel] = {}
+            for key, desc in (
+                ("stable", "Stable — recommended everyday streaming release"),
+                ("beta", "Beta / Pre-release — release candidates when posted"),
+                ("nightly", "Nightly — bleeding-edge latest builds & fixes"),
+            ):
+                row = QHBoxLayout()
+                rb = QRadioButton(desc)
+                info = QLabel("checking...")
+                info.setStyleSheet("color: #8ba0b8; font-weight: 600;")
+                row.addWidget(rb)
+                row.addStretch(1)
+                row.addWidget(info)
+                bl.addLayout(row)
+                self.radios[key] = rb
+                self.ch_labels[key] = info
+            self.radios["stable"].setChecked(True)
+            lay.addWidget(box)
+
+            self.notes = QPlainTextEdit()
+            self.notes.setReadOnly(True)
+            self.notes.setPlaceholderText("Release notes & SHA-256 verification log...")
+            lay.addWidget(self.notes, 1)
+
+            self.pbar = QProgressBar()
+            self.pbar.setRange(0, 100)
+            self.pbar.setValue(0)
+            lay.addWidget(self.pbar)
+
+            act = QHBoxLayout()
+            self.install_btn = QPushButton("Download, Verify SHA-256 & Install Selected Channel")
+            self.install_btn.setObjectName("PrimaryBtn")
+            self.install_btn.setEnabled(False)
+            self.install_btn.clicked.connect(self.start_install)
+            act.addWidget(self.install_btn, 2)
+
+            self.rollback_combo = QComboBox()
+            self.rollback_btn = QPushButton("Rollback Cached")
+            self.rollback_btn.clicked.connect(self.start_rollback)
+            act.addWidget(self.rollback_combo, 1)
+            act.addWidget(self.rollback_btn)
+            lay.addLayout(act)
+
+            self.status_lbl = QLabel("Ready. No changes are made until you click Install.")
+            self.status_lbl.setStyleSheet("color: #e8b84b;")
+            lay.addWidget(self.status_lbl)
+
+            for rb in self.radios.values():
+                rb.toggled.connect(self._update_preview)
+
+            self._refresh_local_state()
+            if not smoke_offscreen:
+                self.refresh()
+
+        def _refresh_local_state(self) -> None:
+            cur = installed_version()
+            svc = service_status()
+            self.cur_lbl.setText(f"Installed: vibepollo {cur or 'NOT INSTALLED'}   |   Service: {svc}")
+            self.rollback_combo.clear()
+            cached = list_cached_packages()
+            for p in cached:
+                self.rollback_combo.addItem(p.name, str(p))
+            self.rollback_btn.setEnabled(bool(cached))
+
+        def selected_channel(self) -> str:
+            for k, rb in self.radios.items():
+                if rb.isChecked():
+                    return k
+            return "stable"
+
+        def refresh(self) -> None:
+            self.refresh_btn.setEnabled(False)
+            self.install_btn.setEnabled(False)
+            self.status_lbl.setText(f"Fetching releases from github.com/{REPO}...")
+            self._worker = FetchWorker()
+            self._worker.done.connect(self._on_fetched)
+            self._worker.start()
+
+        def _on_fetched(self, channels: Any, err: str) -> None:
+            self.refresh_btn.setEnabled(True)
+            if err or not channels:
+                self.status_lbl.setText(f"Failed to fetch releases: {err}")
+                return
+            self._channels = channels
+            for key in ("stable", "beta", "nightly"):
+                rel = channels.get(key)
+                if not rel:
+                    self.ch_labels[key].setText("none posted right now")
+                else:
+                    sz = rel["asset"]["size"] / (1024 * 1024)
+                    self.ch_labels[key].setText(f"{rel['tag']}  ({rel['published_at'][:10]} · {sz:.1f} MiB)")
+            self._update_preview()
+            self.status_lbl.setText("Pick Stable, Beta, or Nightly and click Install.")
+
+        def _update_preview(self) -> None:
+            ch = self.selected_channel()
+            rel = self._channels.get(ch)
+            if not rel:
+                self.install_btn.setEnabled(False)
+                self.notes.setPlainText(
+                    f"No dedicated '{ch}' release is currently posted on {REPO}.\n\n"
+                    "Choose Stable or Nightly above."
+                )
+                return
+            self.install_btn.setEnabled(True)
+            a = rel["asset"]
+            self.notes.setPlainText(
+                f"Channel : {ch.upper()}\n"
+                f"Release : {rel['name']} ({rel['tag']})\n"
+                f"Date    : {rel['published_at']}\n"
+                f"Package : {a['name']} ({a['size'] / (1024*1024):.1f} MiB)\n"
+                f"SHA-256 : {a['sha256'] or 'not published'}\n"
+                f"URL     : {rel['html_url']}\n\n"
+                f"--- Release Notes ---\n{rel['notes'] or '(no notes)'}"
+            )
+
+        def start_install(self) -> None:
+            ch = self.selected_channel()
+            rel = self._channels.get(ch)
+            if not rel:
+                return
+            ans = QMessageBox.question(
+                self,
+                "Install Vibepollo",
+                f"Download, verify SHA-256, and install:\n\n  {rel['name']} ({ch.upper()})\n  {rel['asset']['name']}\n\nProceed?",
+            )
+            if ans != QMessageBox.Yes:
+                return
+            self._run_worker(InstallWorker(rel=rel))
+
+        def start_rollback(self) -> None:
+            path_str = self.rollback_combo.currentData()
+            if not path_str:
+                return
+            pkg = Path(path_str)
+            ans = QMessageBox.question(
+                self,
+                "Rollback Vibepollo",
+                f"Reinstall cached package:\n\n  {pkg.name}\n\nProceed?",
+            )
+            if ans != QMessageBox.Yes:
+                return
+            self._run_worker(InstallWorker(rel=None, local_pkg=pkg))
+
+        def _run_worker(self, w: InstallWorker) -> None:
+            self.install_btn.setEnabled(False)
+            self.rollback_btn.setEnabled(False)
+            self.refresh_btn.setEnabled(False)
+            self.pbar.setValue(0)
+            self._worker = w
+            w.progress.connect(lambda p, m: (self.pbar.setValue(p), self.status_lbl.setText(m)))
+            w.finished_install.connect(self._on_install_done)
+            w.start()
+
+        def _on_install_done(self, rc: int, out: str) -> None:
+            self.refresh_btn.setEnabled(True)
+            self._refresh_local_state()
+            self._update_preview()
+            self.notes.appendPlainText(f"\n--- pacman Output (exit {rc}) ---\n{out}")
+            if rc == 0:
+                self.pbar.setValue(100)
+                self.status_lbl.setText(f"Installed vibepollo {installed_version()} successfully.")
+            else:
+                self.status_lbl.setText(f"Install exited with code {rc} (see log above).")
+
+    win = UpdaterWindow()
+    if smoke_offscreen:
+        app.processEvents()
+        print(json.dumps({"ok": True, "version": __version__, "installed": installed_version(), "service": service_status()}))
+        win.close()
+        return 0
+    win.show()
+    return app.exec()
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--version", action="version", version=f"vibepollo-updater {__version__}")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true", help="show installed version vs Stable/Beta/Nightly")
+    mode.add_argument("--json", action="store_true", help="show release check output as JSON")
+    mode.add_argument("--update", choices=("stable", "beta", "nightly"), help="download, verify SHA-256 & install channel in CLI")
+    mode.add_argument("--rollback", action="store_true", help="reinstall newest cached fallback package")
+    mode.add_argument("--smoke-offscreen", action="store_true", help="headless Qt GUI verification")
+    ns = parser.parse_args(argv)
+
+    if ns.check or ns.json:
+        return cli_check(as_json=ns.json)
+    if ns.update:
+        ch = fetch_channels()
+        rel = ch.get(ns.update)
+        if not rel:
+            print(f"No dedicated '{ns.update}' release is currently posted on {REPO}.", file=sys.stderr)
+            return 2
+        pkg = download_and_verify(rel, progress_cb=lambda p, m: print(f"[{p:3d}%] {m}"))
+        rc, out = install_package(pkg, use_pkexec=False)
+        print(out)
+        return rc
+    if ns.rollback:
+        cached = list_cached_packages()
+        if not cached:
+            print(f"No cached Vibepollo packages found in {CACHE_DIR}.", file=sys.stderr)
+            return 2
+        rc, out = install_package(cached[0], use_pkexec=False)
+        print(out)
+        return rc
+    return launch_gui(smoke_offscreen=ns.smoke_offscreen)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
