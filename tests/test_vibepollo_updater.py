@@ -90,16 +90,40 @@ SAMPLE_RELEASES = [
 
 
 class VibepolloUpdaterTests(unittest.TestCase):
-    def test_parse_channels_picks_stable_beta_nightly_and_ignores_drafts(self) -> None:
+    def test_channels_use_github_prerelease_status_not_numeric_suffix(self) -> None:
         m = _load_mod()
         ch = m.parse_channels(SAMPLE_RELEASES)
         self.assertEqual(ch["stable"]["tag"], "2.18.9")
-        self.assertEqual(ch["beta"]["tag"], "2.19.0-beta.1")
-        self.assertEqual(ch["nightly"]["tag"], "2.20.1")
+        self.assertEqual(ch["latest"]["tag"], "2.20.1")
+        self.assertTrue(ch["latest"]["prerelease"])
         self.assertEqual(ch["stable"]["asset"]["sha256"], "c" * 64)
-        # Pre-release is the newest pre-release of any kind (here the nightly).
-        self.assertEqual(ch["prerelease"]["tag"], "2.20.1")
-        self.assertEqual(ch["prerelease"]["channel"], "prerelease")
+        self.assertEqual(m.select_channel(SAMPLE_RELEASES, "prerelease")["tag"], "2.20.1")
+        self.assertEqual(m.select_channel(SAMPLE_RELEASES, "nightly")["tag"], "2.20.1")
+        # A numeric prerelease with no "nightly" in its name must still be selected.
+        newer = dict(SAMPLE_RELEASES[0], tag_name="2.24.0", name="Vibepollo 2.24.0",
+                     published_at="2026-11-24T09:00:00Z")
+        self.assertEqual(m.parse_channels([newer] + SAMPLE_RELEASES)["latest"]["tag"], "2.24.0")
+        # A misleading title must not override GitHub's stable flag.
+        stable = dict(newer, name="Vibepollo 2.24.0 Nightly", prerelease=False)
+        self.assertEqual(m.classify_channel(stable), "stable")
+
+    def test_numeric_downgrade_is_explicit(self) -> None:
+        m = _load_mod()
+        old_stable = m.parse_channels(SAMPLE_RELEASES)["stable"]
+        latest = m.parse_channels(SAMPLE_RELEASES)["latest"]
+        self.assertTrue(m.release_is_downgrade("2.20.1-1", old_stable))
+        self.assertFalse(m.release_is_downgrade("2.18.9-1", latest))
+        self.assertFalse(m.release_is_downgrade(None, old_stable))
+        self.assertFalse(m.release_is_downgrade("not-a-version", old_stable))
+        self.assertEqual(m.numeric_version("2.20.1-1"), (2, 20, 1))
+        self.assertEqual(m.numeric_version("1:2.20.1-1"), (2, 20, 1))
+
+    def test_missing_release_digest_rejected_before_download(self) -> None:
+        m = _load_mod()
+        bad = dict(SAMPLE_RELEASES[0], asset=dict(m.release_entry(SAMPLE_RELEASES[0])["asset"], sha256=""))
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaisesRegex(ValueError, "SHA-256"):
+                m.download_and_verify(bad, cache_dir=Path(td))
 
     def test_parse_releases_lists_pre_releases_newest_first_and_can_hide_them(self) -> None:
         m = _load_mod()
