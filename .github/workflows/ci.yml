@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Syntax check
-        run: python3 -m py_compile vibepollo-updater tests/test_vibepollo_updater.py
+        run: python3 -m py_compile vibepollo-updater tests/test_vibepollo_updater.py tests/upstream_contract.py
       - name: Shell check
         run: bash -n install.sh
       - name: Unit tests
