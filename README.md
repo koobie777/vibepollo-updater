@@ -1,6 +1,8 @@
-# Vibepollo Updater (Arch Linux GUI + CLI)
+# Vibepollo Installer & Updater (Arch Linux GUI + CLI)
 
-A lightweight, standalone **PySide6 GUI + CLI updater** for **[Nonary/Vibepollo](https://github.com/Nonary/Vibepollo)** on Arch Linux and Arch-based distros (EndeavourOS, CachyOS, Manjaro, etc.).
+A lightweight, standalone **PySide6 GUI + CLI installer and updater** for **[Nonary/Vibepollo](https://github.com/Nonary/Vibepollo)** on Arch Linux and Arch-based distros (EndeavourOS, CachyOS, Manjaro, SteamOS).
+
+Upstream's Linux beta publishes an `x86_64` pacman package and a Windows installer. It does **not** publish Debian, Fedora, AppImage, or Flatpak builds. On those distros this tool still shows Stable / Beta / Nightly, and it refuses to install rather than fetching a package that does not exist. See [upstream's Linux install guide](https://github.com/Nonary/Vibepollo/blob/master/docs/linux/install.md).
 
 Instead of manually hunting through GitHub releases and running `pacman -U` by hand, pick **Stable**, **Beta**, or **Nightly**, inspect the release notes, verify the official SHA-256 digest automatically, and install or roll back in one click.
 

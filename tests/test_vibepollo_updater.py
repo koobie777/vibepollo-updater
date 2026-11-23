@@ -98,6 +98,14 @@ class VibepolloUpdaterTests(unittest.TestCase):
         self.assertEqual(ch["nightly"]["tag"], "2.20.1")
         self.assertEqual(ch["stable"]["asset"]["sha256"], "c" * 64)
 
+    def test_linux_family_accepts_arch_relatives_and_refuses_debian(self) -> None:
+        m = _load_mod()
+        self.assertEqual(m.linux_family('ID=cachyos\nID_LIKE=arch\n'), "arch")
+        self.assertEqual(m.linux_family('ID=endeavouros\nID_LIKE="arch"\n'), "arch")
+        self.assertEqual(m.linux_family('ID=ubuntu\nID_LIKE=debian\n'), "other")
+        self.assertEqual(m.linux_family('ID=fedora\n'), "other")
+        self.assertEqual(m.linux_family(""), "other")
+
     def test_verify_file_sha256_accepts_match_and_rejects_mismatch(self) -> None:
         m = _load_mod()
         with tempfile.TemporaryDirectory() as td:

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Vibepollo Updater — Stable, Beta & Nightly GUI/CLI updater with SHA-256 verification and 1-click rollback.
+"""Vibepollo Installer & Updater — Stable, Beta & Nightly GUI/CLI with SHA-256 verification and 1-click rollback.
 
-Built for Arch Linux and Arch-based distributions (EndeavourOS, CachyOS, Manjaro, SteamOS/Arch)
-running Vibepollo (https://github.com/Nonary/Vibepollo).
+Installs or updates Vibepollo (https://github.com/Nonary/Vibepollo) on Arch Linux and Arch-based
+distributions (EndeavourOS, CachyOS, Manjaro, SteamOS). Upstream's Linux beta ships only an
+x86_64 pacman package. Debian, Fedora, AppImage, and Flatpak builds are not published, so this
+tool refuses to install on those distros instead of pretending a package exists.
 
 - Checks official GitHub releases across Stable, Beta/Pre-release, and Nightly channels.
 - Matches the official x86_64 Arch package (`vibepollo-*-x86_64.pkg.tar.zst`).
@@ -24,7 +26,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 
 REPO = "Nonary/Vibepollo"
 RELEASES_API = f"https://api.github.com/repos/{REPO}/releases?per_page=30"
@@ -36,6 +38,27 @@ SAFE_OVERWRITE_PATH_RE = re.compile(
     re.IGNORECASE,
 )
 MAX_CACHED = 3
+ARCH_FAMILY = frozenset({"arch", "cachyos", "endeavouros", "manjaro", "steamos"})
+
+
+def linux_family(os_release_text: str | None = None) -> str:
+    """Return 'arch' when os-release names an Arch-family distro, else 'other'."""
+    if os_release_text is None:
+        try:
+            os_release_text = Path("/etc/os-release").read_text(encoding="utf-8")
+        except OSError:
+            return "other"
+    tokens: set[str] = set()
+    for line in os_release_text.splitlines():
+        if "=" not in line or line.startswith("#"):
+            continue
+        key, val = line.split("=", 1)
+        if key.strip() not in {"ID", "ID_LIKE", "NAME"}:
+            continue
+        tokens.update(re.split(r"[^a-z0-9]+", val.strip().strip("'\"").lower()))
+    if tokens & ARCH_FAMILY:
+        return "arch"
+    return "other"
 
 DARK_STYLESHEET = """
 QMainWindow, QWidget {
@@ -479,7 +502,8 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
     class UpdaterWindow(QMainWindow):
         def __init__(self) -> None:
             super().__init__()
-            self.setWindowTitle("Vibepollo Updater — Stable · Beta · Nightly")
+            self.setWindowTitle("Vibepollo Installer & Updater — Stable · Beta · Nightly")
+            self._family = linux_family()
             self.resize(840, 620)
             self._channels: dict[str, dict[str, Any] | None] = {}
             self._live_workers: list[QThread] = []
@@ -491,7 +515,7 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             lay.setSpacing(10)
 
             hdr = QHBoxLayout()
-            title = QLabel("VIBEPOLLO UPDATER")
+            title = QLabel("VIBEPOLLO INSTALLER & UPDATER")
             title.setStyleSheet("color: #58e1e8; font-size: 18px; font-weight: 700;")
             self.refresh_btn = QPushButton("Check Releases")
             self.refresh_btn.clicked.connect(self.refresh)
@@ -541,7 +565,7 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             lay.addWidget(self.pbar)
 
             act = QHBoxLayout()
-            self.install_btn = QPushButton("Download, Verify SHA-256 && Install Selected Channel")
+            self.install_btn = QPushButton("Download, Verify SHA-256 && Install")
             self.install_btn.setObjectName("PrimaryBtn")
             self.install_btn.setEnabled(False)
             self.install_btn.clicked.connect(self.start_install)
@@ -569,6 +593,13 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             cur = installed_version()
             svc = service_status()
             self.cur_lbl.setText(f"Installed: vibepollo {cur or 'NOT INSTALLED'}   |   Service: {svc}")
+            if self._family != "arch":
+                self.install_btn.setText("No upstream package for this distro")
+                self.install_btn.setEnabled(False)
+            elif cur:
+                self.install_btn.setText("Download, Verify SHA-256 && Update Selected Channel")
+            else:
+                self.install_btn.setText("Download, Verify SHA-256 && Install Selected Channel")
             self.rollback_combo.clear()
             cached = list_cached_packages()
             for p in cached:
@@ -648,7 +679,7 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
                     "Choose Stable or Nightly above."
                 )
                 return
-            self.install_btn.setEnabled(True)
+            self.install_btn.setEnabled(self._family == "arch")
             a = rel["asset"]
             self.notes.setPlainText(
                 f"Channel : {ch.upper()}\n"
@@ -661,6 +692,11 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             )
 
         def start_install(self) -> None:
+            if self._family != "arch":
+                self.status_lbl.setText(
+                    "Upstream ships an Arch pacman package only. No .deb, .rpm, AppImage, or Flatpak in this beta."
+                )
+                return
             ch = self.selected_channel()
             rel = self._channels.get(ch)
             if not rel:
@@ -777,6 +813,12 @@ def main(argv: list[str] | None = None) -> int:
     if ns.check or ns.json:
         return cli_check(as_json=ns.json)
     if ns.update:
+        if linux_family() != "arch":
+            print(
+                "This distro has no upstream Vibepollo package. Linux beta ships an Arch pacman package only.",
+                file=sys.stderr,
+            )
+            return 2
         ch = fetch_channels()
         rel = ch.get(ns.update)
         if not rel:
