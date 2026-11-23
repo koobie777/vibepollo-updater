@@ -107,6 +107,21 @@ class VibepolloUpdaterTests(unittest.TestCase):
         stable = dict(newer, name="Vibepollo 2.24.0 Nightly", prerelease=False)
         self.assertEqual(m.classify_channel(stable), "stable")
 
+    def test_missing_release_fields_are_not_guessed_as_stable(self) -> None:
+        m = _load_mod()
+        valid = SAMPLE_RELEASES[0]
+        for change in (
+            {"draft": None},
+            {"prerelease": None},
+            {"prerelease": "false"},
+            {"tag_name": ""},
+            {"published_at": ""},
+        ):
+            bad = dict(valid, **change)
+            self.assertIsNone(m.release_entry(bad), change)
+            self.assertFalse(m.parse_releases([bad]), change)
+        self.assertEqual(m.release_entry(valid)["tag"], "2.20.1")
+
     def test_numeric_downgrade_is_explicit(self) -> None:
         m = _load_mod()
         old_stable = m.parse_channels(SAMPLE_RELEASES)["stable"]

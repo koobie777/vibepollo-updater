@@ -199,7 +199,14 @@ CLI_CHANNELS = CHANNELS + ("prerelease", "nightly")
 
 def release_entry(rel: dict[str, Any]) -> dict[str, Any] | None:
     """Normalise one GitHub release; None for drafts and releases without an Arch package."""
-    if not isinstance(rel, dict) or rel.get("draft"):
+    if not isinstance(rel, dict):
+        return None
+    # Missing or malformed upstream release flags must never be guessed as "stable".
+    if not isinstance(rel.get("draft"), bool) or rel["draft"]:
+        return None
+    if not isinstance(rel.get("prerelease"), bool):
+        return None
+    if not str(rel.get("tag_name") or "").strip() or not str(rel.get("published_at") or "").strip():
         return None
     asset = pick_arch_asset(rel)
     if not asset:
@@ -831,8 +838,8 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             if not rel:
                 self.install_btn.setEnabled(False)
                 self.notes.setPlainText(
-                    f"No dedicated '{ch}' release is currently posted on {REPO}.\n\n"
-                    "Choose another channel or a specific version above."
+                    f"No installable '{ch}' release found in the recent releases on {REPO}.\n\n"
+                    "Try another selection. If upstream changed its release format, please open an issue."
                 )
                 return
             self.install_btn.setEnabled(self._family == "arch")
