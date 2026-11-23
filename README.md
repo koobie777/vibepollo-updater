@@ -82,7 +82,7 @@ Upstream Repo       : https://github.com/Nonary/Vibepollo
 1. **HTTPS + Official Upstream Only:** Queries `https://api.github.com/repos/Nonary/Vibepollo/releases` directly and refuses non-HTTPS asset URLs.
 2. **No Shell Execution:** Every `pacman` and `systemctl` call uses strict argv lists (`shell=False`).
 3. **SHA-256 Check Before Elevation:** Downloads to a `.part` temporary file, verifies SHA-256 against GitHub's official asset `digest`, atomically renames into `~/.cache/vibepollo-updater/`, and only then asks for elevation via `pkexec` / `sudo`.
-4. **No Background Daemons or Auto-Updates:** Only runs when you explicitly open it or invoke it from the terminal.
+4. **No Background Daemons or Auto-Updates:** Only runs when you explicitly open it or invoke it from the terminal. The window stays open while a check or install is running, and a close mid-job is ignored so the worker thread is not destroyed.
 
 ---
 

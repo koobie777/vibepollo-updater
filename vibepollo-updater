@@ -24,7 +24,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 REPO = "Nonary/Vibepollo"
 RELEASES_API = f"https://api.github.com/repos/{REPO}/releases?per_page=30"
@@ -280,6 +280,7 @@ def download_and_verify(rel: dict[str, Any], *, cache_dir: Path = CACHE_DIR, pro
     req = urllib.request.Request(url, headers={"User-Agent": f"vibepollo-updater/{__version__}"})
     total = int(asset.get("size") or 0)
     done = 0
+    last_pct = -1
     with urllib.request.urlopen(req, timeout=60) as resp, tmp.open("wb") as out:
         if not total:
             total = int(resp.headers.get("Content-Length") or 0)
@@ -291,7 +292,9 @@ def download_and_verify(rel: dict[str, Any], *, cache_dir: Path = CACHE_DIR, pro
             done += len(chunk)
             if progress_cb and total > 0:
                 pct = int(min(99, (done * 100) // total))
-                progress_cb(pct, f"Downloading {dest.name}: {done / (1024*1024):.1f} / {total / (1024*1024):.1f} MiB")
+                if pct != last_pct:
+                    last_pct = pct
+                    progress_cb(pct, f"Downloading {dest.name}: {done / (1024*1024):.1f} / {total / (1024*1024):.1f} MiB")
 
     try:
         actual = verify_file_sha256(tmp, expected)
@@ -408,7 +411,7 @@ def cli_check(as_json: bool = False) -> int:
 
 def launch_gui(*, smoke_offscreen: bool = False) -> int:
     try:
-        from PySide6.QtCore import QThread, Signal
+        from PySide6.QtCore import QThread, Qt, Signal
         from PySide6.QtWidgets import (
             QApplication,
             QComboBox,
@@ -434,6 +437,9 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
     class FetchWorker(QThread):
         done = Signal(object, str)
 
+        def __init__(self, parent=None) -> None:
+            super().__init__(parent)
+
         def run(self) -> None:
             try:
                 self.done.emit(fetch_channels(), "")
@@ -449,8 +455,9 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             rel: dict[str, Any] | None,
             local_pkg: Path | None = None,
             overwrite_paths: list[str] | None = None,
+            parent=None,
         ) -> None:
-            super().__init__()
+            super().__init__(parent)
             self._rel = rel
             self._local_pkg = local_pkg
             self._overwrite_paths = overwrite_paths
@@ -475,7 +482,7 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             self.setWindowTitle("Vibepollo Updater — Stable · Beta · Nightly")
             self.resize(840, 620)
             self._channels: dict[str, dict[str, Any] | None] = {}
-            self._worker: QThread | None = None
+            self._live_workers: list[QThread] = []
 
             root = QWidget()
             self.setCentralWidget(root)
@@ -574,13 +581,46 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
                     return k
             return "stable"
 
+        def _busy(self) -> bool:
+            return any(worker.isRunning() for worker in self._live_workers)
+
+        def _adopt(self, worker: QThread) -> None:
+            # Parent + queued reap. Destroying a QThread on its own thread aborts
+            # with "Destroyed while thread is still running" (seen 2026-11-23 02:24).
+            worker.setParent(self)
+            worker.setObjectName(type(worker).__name__)
+            self._live_workers.append(worker)
+            worker.finished.connect(self._reap_worker, Qt.ConnectionType.QueuedConnection)
+
+        def _reap_worker(self) -> None:
+            worker = self.sender()
+            if not isinstance(worker, QThread):
+                return
+            worker.wait(60_000)
+            if worker in self._live_workers:
+                self._live_workers.remove(worker)
+            worker.deleteLater()
+
+        def closeEvent(self, event) -> None:
+            if self._busy():
+                event.ignore()
+                self.status_lbl.setText("Still working. This window stays open until the job finishes.")
+                return
+            for worker in list(self._live_workers):
+                worker.wait(5_000)
+            super().closeEvent(event)
+
         def refresh(self) -> None:
+            if self._busy():
+                self.status_lbl.setText("Still working. This window stays open until the job finishes.")
+                return
             self.refresh_btn.setEnabled(False)
             self.install_btn.setEnabled(False)
             self.status_lbl.setText(f"Fetching releases from github.com/{REPO}...")
-            self._worker = FetchWorker()
-            self._worker.done.connect(self._on_fetched)
-            self._worker.start()
+            worker = FetchWorker(self)
+            self._adopt(worker)
+            worker.done.connect(self._on_fetched, Qt.ConnectionType.QueuedConnection)
+            worker.start()
 
         def _on_fetched(self, channels: Any, err: str) -> None:
             self.refresh_btn.setEnabled(True)
@@ -632,7 +672,7 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             )
             if ans != QMessageBox.Yes:
                 return
-            self._run_worker(InstallWorker(rel=rel))
+            self._run_worker(InstallWorker(rel=rel, parent=self))
 
         def start_rollback(self) -> None:
             path_str = self.rollback_combo.currentData()
@@ -646,19 +686,29 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             )
             if ans != QMessageBox.Yes:
                 return
-            self._run_worker(InstallWorker(rel=None, local_pkg=pkg))
+            self._run_worker(InstallWorker(rel=None, local_pkg=pkg, parent=self))
+
+        def _on_progress(self, pct: int, message: str) -> None:
+            self.pbar.setValue(pct)
+            self.status_lbl.setText(message)
 
         def _run_worker(self, w: InstallWorker) -> None:
+            if self._busy():
+                self.status_lbl.setText("Still working. This window stays open until the job finishes.")
+                return
             self.install_btn.setEnabled(False)
             self.rollback_btn.setEnabled(False)
             self.refresh_btn.setEnabled(False)
             self.pbar.setValue(0)
-            self._worker = w
-            w.progress.connect(lambda p, m: (self.pbar.setValue(p), self.status_lbl.setText(m)))
-            w.finished_install.connect(self._on_install_done)
+            self._adopt(w)
+            w.progress.connect(self._on_progress, Qt.ConnectionType.QueuedConnection)
+            w.finished_install.connect(self._on_install_done, Qt.ConnectionType.QueuedConnection)
             w.start()
 
         def _on_install_done(self, rc: int, out: str, pkg: Any) -> None:
+            worker = self.sender()
+            if isinstance(worker, QThread):
+                worker.wait(60_000)
             self.refresh_btn.setEnabled(True)
             self._refresh_local_state()
             self._update_preview()
@@ -679,15 +729,34 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
                     "Retry with scoped --overwrite for ONLY these exact unowned files?",
                 )
                 if ans == QMessageBox.Yes:
-                    self._run_worker(InstallWorker(rel=None, local_pkg=pkg, overwrite_paths=safe_conflicts))
+                    self._run_worker(
+                        InstallWorker(rel=None, local_pkg=pkg, overwrite_paths=safe_conflicts, parent=self)
+                    )
                     return
             self.status_lbl.setText(f"Install exited with code {rc} (see log above).")
 
     win = UpdaterWindow()
     if smoke_offscreen:
+        class NopWorker(QThread):
+            def run(self) -> None:
+                self.msleep(50)
+
+        nop = NopWorker(win)
+        win._adopt(nop)
+        nop.start()
+        nop.wait(2_000)
+        for _ in range(50):
+            app.processEvents()
+            if not win._live_workers:
+                break
+            QThread.msleep(10)
+        if win._live_workers or win._busy():
+            print("worker was not reaped on the GUI thread", file=sys.stderr)
+            return 1
         app.processEvents()
         print(json.dumps({"ok": True, "version": __version__, "installed": installed_version(), "service": service_status()}))
         win.close()
+        app.processEvents()
         return 0
     win.show()
     return app.exec()
