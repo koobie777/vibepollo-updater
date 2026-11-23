@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Vibepollo Installer & Updater — Stable, Pre-release & Nightly GUI/CLI with SHA-256 verification and 1-click rollback.
+"""Vibepollo Installer & Updater — numeric releases with Stable/Latest selection, SHA-256 verification and rollback.
 
 Installs or updates Vibepollo (https://github.com/Nonary/Vibepollo) on Arch Linux and Arch-based
 distributions (EndeavourOS, CachyOS, Manjaro, SteamOS). Upstream's Linux beta ships only an
 x86_64 pacman package. Debian, Fedora, AppImage, and Flatpak builds are not published, so this
 tool refuses to install on those distros instead of pretending a package exists.
 
-- Checks official GitHub releases across Stable, Pre-release (beta, RC or nightly), Beta, and Nightly channels.
+- Uses GitHub release metadata (not tag naming) to distinguish time-gated Stable from Latest.
 - Lists every release, pre-releases included, so any specific version can be installed (`--list`, `--install-version`).
 - Matches the official x86_64 Arch package (`vibepollo-*-x86_64.pkg.tar.zst`).
 - Verifies the GitHub-attested SHA-256 digest before installing (refuses on mismatch).
@@ -27,7 +27,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-__version__ = "1.1.1"
+__version__ = "1.2.0"
 
 REPO = "Nonary/Vibepollo"
 RELEASES_API = f"https://api.github.com/repos/{REPO}/releases?per_page=100"
@@ -186,20 +186,15 @@ def pick_arch_asset(release: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def classify_channel(release: dict[str, Any]) -> str:
-    """Classify a GitHub release into 'stable', 'beta', 'nightly', or 'draft'."""
+    """Use GitHub release status, never a suffix in the numeric version."""
     if release.get("draft"):
         return "draft"
-    if not release.get("prerelease"):
-        return "stable"
-    text = f"{release.get('tag_name', '')} {release.get('name', '')}".lower()
-    if "beta" in text or re.search(r"(^|[^a-z])rc[0-9.]*", text):
-        return "beta"
-    if "nightly" in text:
-        return "nightly"
-    return "beta"
+    return "prerelease" if release.get("prerelease") else "stable"
 
 
-CHANNELS = ("stable", "prerelease", "beta", "nightly")
+# 'latest' may be a pre-release. Older CLI spellings remain as compatibility aliases.
+CHANNELS = ("stable", "latest")
+CLI_CHANNELS = CHANNELS + ("prerelease", "nightly")
 
 
 def release_entry(rel: dict[str, Any]) -> dict[str, Any] | None:
@@ -240,15 +235,37 @@ def find_release(releases: list[dict[str, Any]], tag: str) -> dict[str, Any] | N
 
 
 def parse_channels(releases: list[dict[str, Any]]) -> dict[str, dict[str, Any] | None]:
-    """Latest installable release per channel. 'prerelease' is the newest pre-release of any kind."""
+    """Stable is the newest non-prerelease; Latest is the newest published package."""
     channels: dict[str, dict[str, Any] | None] = {k: None for k in CHANNELS}
     for e in parse_releases(releases):
-        if e["prerelease"] and channels["prerelease"] is None:
-            channels["prerelease"] = dict(e, channel="prerelease")
-        ch = e["channel"]
-        if ch in channels and channels[ch] is None:
-            channels[ch] = e
+        if channels["latest"] is None:
+            channels["latest"] = dict(e, channel="latest")
+        if not e["prerelease"] and channels["stable"] is None:
+            channels["stable"] = e
     return channels
+
+
+def select_channel(releases: list[dict[str, Any]], channel: str) -> dict[str, Any] | None:
+    """Support legacy --update prerelease/nightly without relying on version suffixes."""
+    if channel in ("prerelease", "nightly"):
+        return next(
+            (dict(e, channel=channel) for e in parse_releases(releases) if e["prerelease"]),
+            None,
+        )
+    return parse_channels(releases).get(channel)
+
+
+def numeric_version(version: str | None) -> tuple[int, int, int] | None:
+    """Extract the numeric upstream version, ignoring pacman pkgrel or old suffixes."""
+    match = re.match(r"^(?:\d+:)?v?(\d+)\.(\d+)\.(\d+)(?:$|[.-])", version or "", re.I)
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def release_is_downgrade(installed: str | None, release: dict[str, Any]) -> bool:
+    """Only warn on an unambiguous lower numeric version; never guess about old tags."""
+    old = numeric_version(installed)
+    new = numeric_version(release.get("tag"))
+    return old is not None and new is not None and new < old
 
 
 def fetch_releases(timeout: float = 12.0) -> list[dict[str, Any]]:
@@ -324,7 +341,9 @@ def download_and_verify(rel: dict[str, Any], *, cache_dir: Path = CACHE_DIR, pro
     cache_dir.mkdir(parents=True, exist_ok=True)
     asset = rel["asset"]
     dest = cache_dir / asset["name"]
-    expected = asset.get("sha256") or ""
+    expected = str(asset.get("sha256") or "").lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise ValueError("Official release SHA-256 is missing or invalid; refusing to install.")
 
     if dest.is_file() and expected and sha256_file(dest) == expected:
         if progress_cb:
@@ -463,6 +482,8 @@ def cli_check(as_json: bool = False) -> int:
                 "asset": v["asset"]["name"],
                 "size_mb": round(v["asset"]["size"] / (1024 * 1024), 1),
                 "sha256": v["asset"]["sha256"],
+                "prerelease": v["prerelease"],
+                "older_than_installed": release_is_downgrade(cur, v),
             })
             for k, v in ch.items()
         },
@@ -484,7 +505,9 @@ def cli_check(as_json: bool = False) -> int:
             print(f"  {key:<10}: (no dedicated {key} release posted right now)")
         else:
             sz = v["asset"]["size"] / (1024 * 1024)
-            print(f"  {key:<10}: {v['tag']:<12} [{v['name']}]  ({v['published_at'][:10]}, {sz:.1f} MiB)")
+            caution = "  [OLDER THAN INSTALLED]" if release_is_downgrade(cur, v) else ""
+            status = "pre-release" if v["prerelease"] else "stable"
+            print(f"  {key:<10}: {v['tag']:<12} [{status}]  ({v['published_at'][:10]}, {sz:.1f} MiB){caution}")
     print("Older and specific versions: vibepollo-updater --list")
     if cached:
         print(f"Cached for rollback : {', '.join(cached)}")
@@ -574,7 +597,7 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
     class UpdaterWindow(QMainWindow):
         def __init__(self) -> None:
             super().__init__()
-            self.setWindowTitle("Vibepollo Installer & Updater — Stable · Pre-release · Nightly")
+            self.setWindowTitle("Vibepollo Installer & Updater — Stable · Latest")
             self._family = linux_family()
             self.resize(840, 620)
             self._channels: dict[str, dict[str, Any] | None] = {}
@@ -610,10 +633,8 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             self.radios: dict[str, QRadioButton] = {}
             self.ch_labels: dict[str, QLabel] = {}
             for key, desc in (
-                ("stable", "Stable — recommended everyday streaming release"),
-                ("prerelease", "Pre-release — newest beta, RC or nightly"),
-                ("beta", "Beta — release candidates when posted"),
-                ("nightly", "Nightly — bleeding-edge latest builds && fixes"),
+                ("stable", "Stable — time-gated verified release"),
+                ("latest", "Latest — newest published release (may be pre-release)"),
             ):
                 row = QHBoxLayout()
                 rb = QRadioButton(desc)
@@ -780,7 +801,7 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             self.version_combo.blockSignals(True)
             self.version_combo.clear()
             for e in parse_releases(self._raw_releases, include_prereleases=self.show_pre.isChecked()):
-                kind = e["channel"].upper() if e["prerelease"] else "STABLE"
+                kind = "PRE-RELEASE" if e["prerelease"] else "STABLE"
                 self.version_combo.addItem(f"{e['tag']}  ·  {kind}  ·  {e['published_at'][:10]}", e["tag"])
             idx = self.version_combo.findData(keep) if keep else -1
             self.version_combo.setCurrentIndex(max(idx, 0))
@@ -817,8 +838,14 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             self.install_btn.setEnabled(self._family == "arch")
             a = rel["asset"]
             kind = "PRE-RELEASE" if rel["prerelease"] else "STABLE"
+            caution = (
+                "WARNING : This build is numerically older than your installed Vibepollo.\n"
+                "          Stable is time-gated; switching from Latest may be a downgrade.\n"
+                if release_is_downgrade(installed_version(), rel) else ""
+            )
             self.notes.setPlainText(
-                f"Channel : {ch.upper() if ch != 'version' else 'SPECIFIC VERSION'} ({kind})\n"
+                caution
+                + f"Channel : {ch.upper() if ch != 'version' else 'SPECIFIC VERSION'} ({kind})\n"
                 f"Release : {rel['name']} ({rel['tag']})\n"
                 f"Date    : {rel['published_at']}\n"
                 f"Package : {a['name']} ({a['size'] / (1024*1024):.1f} MiB)\n"
@@ -839,10 +866,18 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
                 return
             if ch == "version":
                 ch = "pre-release" if rel["prerelease"] else "stable"
+            downgrade = release_is_downgrade(installed_version(), rel)
+            warning = (
+                "WARNING: This is a NUMERIC DOWNGRADE. Stable releases are time-gated.\n"
+                "You are choosing an older version than the one currently installed.\n\n"
+                if downgrade else ""
+            )
             ans = QMessageBox.question(
                 self,
-                "Install Vibepollo",
-                f"Download, verify SHA-256, and install:\n\n  {rel['name']} ({ch.upper()})\n  {rel['asset']['name']}\n\nProceed?",
+                "Confirm Vibepollo Downgrade" if downgrade else "Install Vibepollo",
+                warning + f"Download, verify SHA-256, and install:\n\n  {rel['name']} ({ch.upper()})\n  {rel['asset']['name']}\n\nProceed?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
             )
             if ans != QMessageBox.Yes:
                 return
@@ -940,15 +975,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", action="version", version=f"vibepollo-updater {__version__}")
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--check", action="store_true", help="show installed version vs Stable/Pre-release/Beta/Nightly")
+    mode.add_argument("--check", action="store_true", help="show installed version vs Stable and Latest")
     mode.add_argument("--list", action="store_true", help="list every release, pre-releases included")
     mode.add_argument("--install-version", metavar="TAG", help="download, verify SHA-256 & install one specific release (stable or pre-release)")
     mode.add_argument("--json", action="store_true", help="show release check output as JSON")
-    mode.add_argument("--update", choices=CHANNELS, help="download, verify SHA-256 & install channel in CLI")
+    mode.add_argument("--update", choices=CLI_CHANNELS, help="install stable or latest (prerelease/nightly are legacy aliases)")
     mode.add_argument("--rollback", action="store_true", help="reinstall newest cached fallback package")
     mode.add_argument("--smoke-offscreen", action="store_true", help="headless Qt GUI verification")
     mode.add_argument("--desktop-icon", choices=("on", "off", "status"), help="optional Vibepollo launcher on the Desktop")
     parser.add_argument("--stable-only", action="store_true", help="with --list, hide pre-releases")
+    parser.add_argument("--allow-downgrade", action="store_true", help="explicitly permit an older numeric version via --update/--install-version")
     parser.add_argument("--overwrite-unowned", action="store_true", help="in CLI --update/--rollback, retry scoped --overwrite for unowned vibepollo/vibeshine file conflicts")
     ns = parser.parse_args(argv)
 
@@ -978,11 +1014,20 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             retry = f"--install-version {rel['tag']}"
         else:
-            rel = fetch_channels().get(ns.update)
+            rel = select_channel(fetch_releases(), ns.update)
             retry = f"--update {ns.update}"
             if not rel:
-                print(f"No dedicated '{ns.update}' release is currently posted on {REPO}.", file=sys.stderr)
+                print(f"No installable '{ns.update}' release is currently posted on {REPO}.", file=sys.stderr)
                 return 2
+        current = installed_version()
+        if release_is_downgrade(current, rel) and not ns.allow_downgrade:
+            print(
+                f"Refusing implicit downgrade: installed {current}, selected {rel['tag']}. "
+                "Stable is time-gated and may lag behind Latest. "
+                f"If intentional, rerun with --allow-downgrade: vibepollo-updater {retry} --allow-downgrade",
+                file=sys.stderr,
+            )
+            return 2
         pkg = download_and_verify(rel, progress_cb=lambda p, m: print(f"[{p:3d}%] {m}"))
         rc, out = install_package(pkg, use_pkexec=False)
         if rc != 0:
