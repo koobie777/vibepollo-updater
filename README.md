@@ -4,19 +4,21 @@ A lightweight, standalone **PySide6 GUI + CLI installer and updater** for **[Non
 
 Upstream's Linux beta publishes an `x86_64` pacman package and a Windows installer. It does **not** publish Debian, Fedora, AppImage, or Flatpak builds. On those distros this tool still shows every channel and version, and it refuses to install rather than fetching a package that does not exist. See [upstream's Linux install guide](https://github.com/Nonary/Vibepollo/blob/master/docs/linux/install.md).
 
-Instead of manually hunting through GitHub releases and running `pacman -U` by hand, pick **Stable**, **Pre-release**, **Beta**, **Nightly**, or any **specific version** (pre-releases included), inspect the release notes, verify the official SHA-256 digest automatically, and install or roll back in one click.
+Instead of manually hunting through GitHub releases and running `pacman -U` by hand, pick **Stable**, **Latest**, or any **specific version** (pre-releases included), inspect release notes, verify the official SHA-256 digest, and install or roll back.
+
+**Upstream release model (November 2026):** VibePollo publishes numeric `2.x.x` versions across release types. The numeric tag alone does not identify stability; GitHub's `prerelease` metadata does. **Stable is time-gated** and can be numerically *older* than Latest. The updater detects this and warns before a downgrade (CLI requires `--allow-downgrade`).
 
 ---
 
 ## Features
 
-- **3 Release Channels:**
-  - **Stable** — latest non-prerelease GitHub release.
-  - **Pre-release** — the newest upstream pre-release of any kind (beta, RC or nightly).
-  - **Beta** — release candidates & beta builds whenever posted upstream.
-  - **Nightly** — latest Nightly build with bleeding-edge fixes.
-  - **Specific version** — every release from the last 100, pre-releases included (untick *Show pre-releases* to see stable only). Good for pinning a known-good nightly or going back further than the rollback cache.
-- **Mandatory SHA-256 Verification:** Checks every downloaded `vibepollo-*-x86_64.pkg.tar.zst` against the official GitHub release digest before invoking `pacman -U` (refuses to install and deletes the temp file on mismatch).
+- **Release selection based on upstream metadata:**
+  - **Stable** — newest GitHub release *not* marked as prerelease (time-gated).
+  - **Latest** — newest published GitHub release, including prereleases.
+  - **Specific version** — install a chosen tag from the last 100 releases; toggle *Show pre-releases* to filter.
+  - **Legacy CLI aliases** — `--update prerelease` and `--update nightly` both select the newest published prerelease, regardless of tag naming. Deprecated as UI categories; `--update beta` is not supported for the new numeric release stream.
+- **Downgrade protection:** Warns in the GUI when the selected `2.x.x` version is older than the installed version. The CLI refuses unless you explicitly add `--allow-downgrade`. Intentional rollback remains available.
+- **Mandatory SHA-256 Verification:** Checks every downloaded `vibepollo-*-x86_64.pkg.tar.zst` against the official GitHub release digest before invoking `pacman -U` (also refuses missing or malformed digests).
 - **Smart Channel-Switch Conflict Handling:** When switching between Stable and Nightly (for example, an untracked `/usr/lib/libvibeshine-kwin-gpu.so` left behind by an earlier build), detects unowned `vibepollo`/`vibeshine` files via `pacman -Qo` and offers a strictly scoped `--overwrite` for ONLY those exact unowned files (never blind `--overwrite '*'`).
 - **1-Click Rollback:** Automatically caches the last 3 verified `.pkg.tar.zst` packages in `~/.cache/vibepollo-updater/` so switching back from a Nightly takes one click (or one command).
 - **Clean Native Elevation:** Uses `pkexec pacman -U` in GUI mode (standard Polkit / KDE / GNOME password prompt) and `sudo pacman -U` in CLI mode — never runs an unpinned remote shell script and never touches system files until you confirm.
@@ -56,7 +58,7 @@ vibepollo-updater
 
 ### CLI Mode
 ```bash
-# Compare your installed Vibepollo version against Stable, Pre-release, Beta, and Nightly
+# Compare installed Vibepollo against Stable and Latest (including downgrade indicators)
 vibepollo-updater --check
 
 # Machine-readable JSON output
@@ -64,9 +66,12 @@ vibepollo-updater --json
 
 # Download, verify SHA-256, and install a channel
 vibepollo-updater --update stable
-vibepollo-updater --update prerelease   # newest pre-release of any kind
-vibepollo-updater --update beta
-vibepollo-updater --update nightly
+vibepollo-updater --update latest
+vibepollo-updater --update prerelease  # legacy alias for latest pre-release
+vibepollo-updater --update nightly     # same legacy alias
+
+# Only when deliberately switching to an older numeric version:
+vibepollo-updater --update stable --allow-downgrade
 
 # Roll back to the most recent cached package
 vibepollo-updater --rollback
@@ -82,10 +87,8 @@ vibepollo-updater --install-version 2.20.1
 ```text
 Vibepollo Installed : 2.20.1-1 (controller=active · host=active)
 Upstream Repo       : https://github.com/Nonary/Vibepollo
-  stable    : 2.18.9       [v2.18.9]  (2026-11-19, 183.0 MiB)
-  prerelease: 2.23.1       [Vibepollo 2.23.1 (Nightly)]  (2026-11-23, 183.3 MiB)
-  beta      : 2.0.0-beta.3 [v2.0.0-beta.3]  (2026-09-14, 29.8 MiB)
-  nightly   : 2.23.1       [Vibepollo 2.23.1 (Nightly)]  (2026-11-23, 183.3 MiB)
+  stable    : 2.18.9       [stable]  (2026-11-19, 183.0 MiB)  [OLDER THAN INSTALLED]
+  latest    : 2.23.1       [pre-release]  (2026-11-23, 183.3 MiB)
 Older and specific versions: vibepollo-updater --list
 ```
 
@@ -95,7 +98,7 @@ Older and specific versions: vibepollo-updater --list
 
 1. **HTTPS + Official Upstream Only:** Queries `https://api.github.com/repos/Nonary/Vibepollo/releases` directly and refuses non-HTTPS asset URLs.
 2. **No Shell Execution:** Every `pacman` and `systemctl` call uses strict argv lists (`shell=False`).
-3. **SHA-256 Check Before Elevation:** Downloads to a `.part` temporary file, verifies SHA-256 against GitHub's official asset `digest`, atomically renames into `~/.cache/vibepollo-updater/`, and only then asks for elevation via `pkexec` / `sudo`.
+3. **SHA-256 Check Before Elevation:** Requires an official 64-digit SHA-256 `digest`, downloads to a `.part` temporary file, verifies before caching, and only then asks for elevation via `pkexec` / `sudo`.
 4. **No Background Daemons or Auto-Updates:** Only runs when you explicitly open it or invoke it from the terminal. The window stays open while a check or install is running, and a close mid-job is ignored so the worker thread is not destroyed.
 
 ---
