@@ -97,6 +97,30 @@ class VibepolloUpdaterTests(unittest.TestCase):
         self.assertEqual(ch["beta"]["tag"], "2.19.0-beta.1")
         self.assertEqual(ch["nightly"]["tag"], "2.20.1")
         self.assertEqual(ch["stable"]["asset"]["sha256"], "c" * 64)
+        # Pre-release is the newest pre-release of any kind (here the nightly).
+        self.assertEqual(ch["prerelease"]["tag"], "2.20.1")
+        self.assertEqual(ch["prerelease"]["channel"], "prerelease")
+
+    def test_parse_releases_lists_pre_releases_newest_first_and_can_hide_them(self) -> None:
+        m = _load_mod()
+        rows = m.parse_releases(SAMPLE_RELEASES)
+        tags = [e["tag"] for e in rows]
+        self.assertIn("2.19.0-beta.1", tags)
+        self.assertIn("2.20.1", tags)
+        self.assertEqual(rows, sorted(rows, key=lambda e: e["published_at"], reverse=True))
+        stable = m.parse_releases(SAMPLE_RELEASES, include_prereleases=False)
+        self.assertTrue(stable)
+        self.assertTrue(all(not e["prerelease"] for e in stable))
+        self.assertFalse(any(e["tag"] == "2.19.0-beta.1" for e in stable))
+
+    def test_find_release_matches_exact_and_v_prefixed_tags_and_skips_drafts(self) -> None:
+        m = _load_mod()
+        self.assertEqual(m.find_release(SAMPLE_RELEASES, "2.19.0-beta.1")["tag"], "2.19.0-beta.1")
+        self.assertEqual(m.find_release(SAMPLE_RELEASES, "v2.18.9")["tag"], "2.18.9")
+        self.assertIsNone(m.find_release(SAMPLE_RELEASES, "9.9.9"))
+        drafts = [r["tag_name"] for r in SAMPLE_RELEASES if r.get("draft")]
+        for t in drafts:
+            self.assertIsNone(m.find_release(SAMPLE_RELEASES, t))
 
     def test_linux_family_accepts_arch_relatives_and_refuses_debian(self) -> None:
         m = _load_mod()

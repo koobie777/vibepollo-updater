@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Vibepollo Installer & Updater — Stable, Beta & Nightly GUI/CLI with SHA-256 verification and 1-click rollback.
+"""Vibepollo Installer & Updater — Stable, Pre-release & Nightly GUI/CLI with SHA-256 verification and 1-click rollback.
 
 Installs or updates Vibepollo (https://github.com/Nonary/Vibepollo) on Arch Linux and Arch-based
 distributions (EndeavourOS, CachyOS, Manjaro, SteamOS). Upstream's Linux beta ships only an
 x86_64 pacman package. Debian, Fedora, AppImage, and Flatpak builds are not published, so this
 tool refuses to install on those distros instead of pretending a package exists.
 
-- Checks official GitHub releases across Stable, Beta/Pre-release, and Nightly channels.
+- Checks official GitHub releases across Stable, Pre-release (beta, RC or nightly), Beta, and Nightly channels.
+- Lists every release, pre-releases included, so any specific version can be installed (`--list`, `--install-version`).
 - Matches the official x86_64 Arch package (`vibepollo-*-x86_64.pkg.tar.zst`).
 - Verifies the GitHub-attested SHA-256 digest before installing (refuses on mismatch).
 - Installs via `pkexec pacman -U` in GUI mode or `sudo pacman -U` in CLI mode.
@@ -26,10 +27,10 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-__version__ = "1.0.3"
+__version__ = "1.1.0"
 
 REPO = "Nonary/Vibepollo"
-RELEASES_API = f"https://api.github.com/repos/{REPO}/releases?per_page=30"
+RELEASES_API = f"https://api.github.com/repos/{REPO}/releases?per_page=100"
 CACHE_DIR = Path.home() / ".cache/vibepollo-updater"
 PKG_RE = re.compile(r"^vibepollo-.+-x86_64\.pkg\.tar(\.zst|\.xz)?$", re.IGNORECASE)
 CONFLICT_LINE_RE = re.compile(r"^vibepollo:\s+(/\S+)\s+exists in filesystem\b")
@@ -196,31 +197,60 @@ def classify_channel(release: dict[str, Any]) -> str:
     return "beta"
 
 
+CHANNELS = ("stable", "prerelease", "beta", "nightly")
+
+
+def release_entry(rel: dict[str, Any]) -> dict[str, Any] | None:
+    """Normalise one GitHub release; None for drafts and releases without an Arch package."""
+    if not isinstance(rel, dict) or rel.get("draft"):
+        return None
+    asset = pick_arch_asset(rel)
+    if not asset:
+        return None
+    return {
+        "channel": classify_channel(rel),
+        "prerelease": bool(rel.get("prerelease")),
+        "tag": str(rel.get("tag_name") or ""),
+        "name": str(rel.get("name") or rel.get("tag_name") or ""),
+        "published_at": str(rel.get("published_at") or ""),
+        "html_url": str(rel.get("html_url") or ""),
+        "notes": str(rel.get("body") or "").strip()[:2000],
+        "asset": asset,
+    }
+
+
+def parse_releases(releases: list[dict[str, Any]], *, include_prereleases: bool = True) -> list[dict[str, Any]]:
+    """Every installable release, newest first, pre-releases included unless asked not to."""
+    out = [e for e in (release_entry(r) for r in releases) if e]
+    if not include_prereleases:
+        out = [e for e in out if not e["prerelease"]]
+    out.sort(key=lambda e: e["published_at"], reverse=True)
+    return out
+
+
+def find_release(releases: list[dict[str, Any]], tag: str) -> dict[str, Any] | None:
+    """Match a tag exactly, or with a leading 'v' added or dropped."""
+    want = tag.strip().lower().removeprefix("v")
+    for e in parse_releases(releases):
+        if e["tag"].lower().removeprefix("v") == want:
+            return e
+    return None
+
+
 def parse_channels(releases: list[dict[str, Any]]) -> dict[str, dict[str, Any] | None]:
-    """Select the latest release with an Arch x86_64 package for each channel."""
-    channels: dict[str, dict[str, Any] | None] = {"stable": None, "beta": None, "nightly": None}
-    for rel in releases:
-        if not isinstance(rel, dict) or rel.get("draft"):
-            continue
-        asset = pick_arch_asset(rel)
-        if not asset:
-            continue
-        ch = classify_channel(rel)
+    """Latest installable release per channel. 'prerelease' is the newest pre-release of any kind."""
+    channels: dict[str, dict[str, Any] | None] = {k: None for k in CHANNELS}
+    for e in parse_releases(releases):
+        if e["prerelease"] and channels["prerelease"] is None:
+            channels["prerelease"] = dict(e, channel="prerelease")
+        ch = e["channel"]
         if ch in channels and channels[ch] is None:
-            channels[ch] = {
-                "channel": ch,
-                "tag": str(rel.get("tag_name") or ""),
-                "name": str(rel.get("name") or rel.get("tag_name") or ""),
-                "published_at": str(rel.get("published_at") or ""),
-                "html_url": str(rel.get("html_url") or ""),
-                "notes": str(rel.get("body") or "").strip()[:2000],
-                "asset": asset,
-            }
+            channels[ch] = e
     return channels
 
 
-def fetch_channels(timeout: float = 12.0) -> dict[str, dict[str, Any] | None]:
-    """Fetch recent releases from GitHub REST API (no auth required)."""
+def fetch_releases(timeout: float = 12.0) -> list[dict[str, Any]]:
+    """Fetch the latest 100 raw releases from the GitHub REST API (no auth required)."""
     req = urllib.request.Request(
         RELEASES_API,
         headers={
@@ -232,7 +262,11 @@ def fetch_channels(timeout: float = 12.0) -> dict[str, dict[str, Any] | None]:
         releases = json.loads(resp.read().decode("utf-8", "replace"))
     if not isinstance(releases, list):
         raise ValueError("unexpected GitHub releases response")
-    return parse_channels(releases)
+    return releases
+
+
+def fetch_channels(timeout: float = 12.0) -> dict[str, dict[str, Any] | None]:
+    return parse_channels(fetch_releases(timeout))
 
 
 def sha256_file(path: Path) -> str:
@@ -396,7 +430,8 @@ def install_package(
 def cli_check(as_json: bool = False) -> int:
     cur = installed_version()
     svc = service_status()
-    ch = fetch_channels()
+    raw = fetch_releases()
+    ch = parse_channels(raw)
     cached = [p.name for p in list_cached_packages()]
     payload = {
         "installed": cur,
@@ -413,6 +448,11 @@ def cli_check(as_json: bool = False) -> int:
             })
             for k, v in ch.items()
         },
+        "releases": [
+            {"tag": e["tag"], "prerelease": e["prerelease"], "channel": e["channel"],
+             "published_at": e["published_at"], "asset": e["asset"]["name"], "sha256": e["asset"]["sha256"]}
+            for e in parse_releases(raw)
+        ],
         "cached_rollbacks": cached,
     }
     if as_json:
@@ -420,15 +460,28 @@ def cli_check(as_json: bool = False) -> int:
         return 0
     print(f"Vibepollo Installed : {cur or 'NOT INSTALLED'} ({svc})")
     print(f"Upstream Repo       : https://github.com/{REPO}")
-    for key in ("stable", "beta", "nightly"):
+    for key in CHANNELS:
         v = ch.get(key)
         if not v:
-            print(f"  {key:<8}: (no dedicated {key} release posted right now)")
+            print(f"  {key:<10}: (no dedicated {key} release posted right now)")
         else:
             sz = v["asset"]["size"] / (1024 * 1024)
-            print(f"  {key:<8}: {v['tag']:<12} [{v['name']}]  ({v['published_at'][:10]}, {sz:.1f} MiB)")
+            print(f"  {key:<10}: {v['tag']:<12} [{v['name']}]  ({v['published_at'][:10]}, {sz:.1f} MiB)")
+    print("Older and specific versions: vibepollo-updater --list")
     if cached:
         print(f"Cached for rollback : {', '.join(cached)}")
+    return 0
+
+
+def cli_list(*, include_prereleases: bool = True) -> int:
+    cur = installed_version()
+    rows = parse_releases(fetch_releases(), include_prereleases=include_prereleases)
+    print(f"{'TAG':<44} {'KIND':<11} {'DATE':<10}  SIZE")
+    for e in rows:
+        kind = e["channel"] if e["prerelease"] else "stable"
+        mark = "  <- installed" if cur and cur.split("-")[0] == e["asset"]["name"].split("-")[1] else ""
+        print(f"{e['tag']:<44} {kind:<11} {e['published_at'][:10]}  {e['asset']['size'] / (1024 * 1024):.1f} MiB{mark}")
+    print(f"\n{len(rows)} releases. Install one: vibepollo-updater --install-version <TAG>")
     return 0
 
 
@@ -437,6 +490,7 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
         from PySide6.QtCore import QThread, Qt, Signal
         from PySide6.QtWidgets import (
             QApplication,
+            QCheckBox,
             QComboBox,
             QFrame,
             QHBoxLayout,
@@ -465,7 +519,7 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
 
         def run(self) -> None:
             try:
-                self.done.emit(fetch_channels(), "")
+                self.done.emit(fetch_releases(), "")
             except Exception as exc:
                 self.done.emit(None, str(exc))
 
@@ -502,10 +556,11 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
     class UpdaterWindow(QMainWindow):
         def __init__(self) -> None:
             super().__init__()
-            self.setWindowTitle("Vibepollo Installer & Updater — Stable · Beta · Nightly")
+            self.setWindowTitle("Vibepollo Installer & Updater — Stable · Pre-release · Nightly")
             self._family = linux_family()
             self.resize(840, 620)
             self._channels: dict[str, dict[str, Any] | None] = {}
+            self._raw_releases: list[dict[str, Any]] = []
             self._live_workers: list[QThread] = []
 
             root = QWidget()
@@ -538,7 +593,8 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             self.ch_labels: dict[str, QLabel] = {}
             for key, desc in (
                 ("stable", "Stable — recommended everyday streaming release"),
-                ("beta", "Beta / Pre-release — release candidates when posted"),
+                ("prerelease", "Pre-release — newest beta, RC or nightly"),
+                ("beta", "Beta — release candidates when posted"),
                 ("nightly", "Nightly — bleeding-edge latest builds && fixes"),
             ):
                 row = QHBoxLayout()
@@ -551,6 +607,19 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
                 bl.addLayout(row)
                 self.radios[key] = rb
                 self.ch_labels[key] = info
+            row = QHBoxLayout()
+            rb = QRadioButton("Specific version")
+            self.version_combo = QComboBox()
+            self.version_combo.setMinimumWidth(320)
+            self.show_pre = QCheckBox("Show pre-releases")
+            self.show_pre.setChecked(True)
+            row.addWidget(rb)
+            row.addWidget(self.version_combo, 1)
+            row.addWidget(self.show_pre)
+            bl.addLayout(row)
+            self.radios["version"] = rb
+            self.version_combo.currentIndexChanged.connect(self._on_version_picked)
+            self.show_pre.toggled.connect(self._fill_versions)
             self.radios["stable"].setChecked(True)
             lay.addWidget(box)
 
@@ -653,13 +722,16 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             worker.done.connect(self._on_fetched, Qt.ConnectionType.QueuedConnection)
             worker.start()
 
-        def _on_fetched(self, channels: Any, err: str) -> None:
+        def _on_fetched(self, releases: Any, err: str) -> None:
             self.refresh_btn.setEnabled(True)
-            if err or not channels:
+            if err or not releases:
                 self.status_lbl.setText(f"Failed to fetch releases: {err}")
                 return
+            self._raw_releases = releases
+            channels = parse_channels(releases)
             self._channels = channels
-            for key in ("stable", "beta", "nightly"):
+            self._fill_versions()
+            for key in CHANNELS:
                 rel = channels.get(key)
                 if not rel:
                     self.ch_labels[key].setText("none posted right now")
@@ -667,22 +739,52 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
                     sz = rel["asset"]["size"] / (1024 * 1024)
                     self.ch_labels[key].setText(f"{rel['tag']}  ({rel['published_at'][:10]} · {sz:.1f} MiB)")
             self._update_preview()
-            self.status_lbl.setText("Pick Stable, Beta, or Nightly and click Install.")
+            self.status_lbl.setText("Pick a channel or a specific version and click Install.")
+
+        def _fill_versions(self) -> None:
+            keep = self.version_combo.currentData()
+            self.version_combo.blockSignals(True)
+            self.version_combo.clear()
+            for e in parse_releases(self._raw_releases, include_prereleases=self.show_pre.isChecked()):
+                kind = e["channel"].upper() if e["prerelease"] else "STABLE"
+                self.version_combo.addItem(f"{e['tag']}  ·  {kind}  ·  {e['published_at'][:10]}", e["tag"])
+            idx = self.version_combo.findData(keep) if keep else -1
+            self.version_combo.setCurrentIndex(max(idx, 0))
+            self.version_combo.blockSignals(False)
+            self._update_preview()
+
+        def _on_version_picked(self) -> None:
+            if not self.radios["version"].isChecked():
+                self.radios["version"].setChecked(True)
+            else:
+                self._update_preview()
+
+        def selected_release(self) -> dict[str, Any] | None:
+            ch = self.selected_channel()
+            if ch == "version":
+                tag = self.version_combo.currentData()
+                return find_release(self._raw_releases, tag) if tag else None
+            return self._channels.get(ch)
 
         def _update_preview(self) -> None:
             ch = self.selected_channel()
-            rel = self._channels.get(ch)
+            rel = self.selected_release()
+            if not rel and ch == "version":
+                self.install_btn.setEnabled(False)
+                self.notes.setPlainText("Check Releases first, then pick a version.")
+                return
             if not rel:
                 self.install_btn.setEnabled(False)
                 self.notes.setPlainText(
                     f"No dedicated '{ch}' release is currently posted on {REPO}.\n\n"
-                    "Choose Stable or Nightly above."
+                    "Choose another channel or a specific version above."
                 )
                 return
             self.install_btn.setEnabled(self._family == "arch")
             a = rel["asset"]
+            kind = "PRE-RELEASE" if rel["prerelease"] else "STABLE"
             self.notes.setPlainText(
-                f"Channel : {ch.upper()}\n"
+                f"Channel : {ch.upper() if ch != 'version' else 'SPECIFIC VERSION'} ({kind})\n"
                 f"Release : {rel['name']} ({rel['tag']})\n"
                 f"Date    : {rel['published_at']}\n"
                 f"Package : {a['name']} ({a['size'] / (1024*1024):.1f} MiB)\n"
@@ -698,9 +800,11 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
                 )
                 return
             ch = self.selected_channel()
-            rel = self._channels.get(ch)
+            rel = self.selected_release()
             if not rel:
                 return
+            if ch == "version":
+                ch = "pre-release" if rel["prerelease"] else "stable"
             ans = QMessageBox.question(
                 self,
                 "Install Vibepollo",
@@ -802,28 +906,40 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", action="version", version=f"vibepollo-updater {__version__}")
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--check", action="store_true", help="show installed version vs Stable/Beta/Nightly")
+    mode.add_argument("--check", action="store_true", help="show installed version vs Stable/Pre-release/Beta/Nightly")
+    mode.add_argument("--list", action="store_true", help="list every release, pre-releases included")
+    mode.add_argument("--install-version", metavar="TAG", help="download, verify SHA-256 & install one specific release (stable or pre-release)")
     mode.add_argument("--json", action="store_true", help="show release check output as JSON")
-    mode.add_argument("--update", choices=("stable", "beta", "nightly"), help="download, verify SHA-256 & install channel in CLI")
+    mode.add_argument("--update", choices=CHANNELS, help="download, verify SHA-256 & install channel in CLI")
     mode.add_argument("--rollback", action="store_true", help="reinstall newest cached fallback package")
     mode.add_argument("--smoke-offscreen", action="store_true", help="headless Qt GUI verification")
+    parser.add_argument("--stable-only", action="store_true", help="with --list, hide pre-releases")
     parser.add_argument("--overwrite-unowned", action="store_true", help="in CLI --update/--rollback, retry scoped --overwrite for unowned vibepollo/vibeshine file conflicts")
     ns = parser.parse_args(argv)
 
     if ns.check or ns.json:
         return cli_check(as_json=ns.json)
-    if ns.update:
+    if ns.list:
+        return cli_list(include_prereleases=not ns.stable_only)
+    if ns.update or ns.install_version:
         if linux_family() != "arch":
             print(
                 "This distro has no upstream Vibepollo package. Linux beta ships an Arch pacman package only.",
                 file=sys.stderr,
             )
             return 2
-        ch = fetch_channels()
-        rel = ch.get(ns.update)
-        if not rel:
-            print(f"No dedicated '{ns.update}' release is currently posted on {REPO}.", file=sys.stderr)
-            return 2
+        if ns.install_version:
+            rel = find_release(fetch_releases(), ns.install_version)
+            if not rel:
+                print(f"No installable release tagged '{ns.install_version}' on {REPO}. See --list.", file=sys.stderr)
+                return 2
+            retry = f"--install-version {rel['tag']}"
+        else:
+            rel = fetch_channels().get(ns.update)
+            retry = f"--update {ns.update}"
+            if not rel:
+                print(f"No dedicated '{ns.update}' release is currently posted on {REPO}.", file=sys.stderr)
+                return 2
         pkg = download_and_verify(rel, progress_cb=lambda p, m: print(f"[{p:3d}%] {m}"))
         rc, out = install_package(pkg, use_pkexec=False)
         if rc != 0:
@@ -835,7 +951,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(out)
                 print(
                     f"\nHint: Unowned Vibepollo file conflict detected ({', '.join(safe)}).\n"
-                    f"Re-run with: vibepollo-updater --update {ns.update} --overwrite-unowned",
+                    f"Re-run with: vibepollo-updater {retry} --overwrite-unowned",
                     file=sys.stderr,
                 )
                 return rc
