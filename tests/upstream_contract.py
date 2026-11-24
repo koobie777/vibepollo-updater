@@ -55,6 +55,26 @@ def _check_platform(m, raw: list[dict], recent: list[dict], *, windows: bool) ->
     return f"{label}: {checked} assets (stable={channels['stable']['tag']}, latest={channels['latest']['tag']})"
 
 
+def _check_vigembus(m) -> str:
+    import json
+    import urllib.request
+    req = urllib.request.Request(
+        f"https://api.github.com/repos/{m.VIGEMBUS_REPO}/releases/tags/{m.VIGEMBUS_TAG}",
+        headers={"Accept": "application/vnd.github+json", "User-Agent": f"vibepollo-updater/{m.__version__}"},
+    )
+    with urllib.request.urlopen(req, timeout=20.0) as resp:
+        rel = json.loads(resp.read().decode("utf-8", "replace"))
+    assets = rel.get("assets") or []
+    match = next((a for a in assets if isinstance(a, dict) and a.get("name") == m.VIGEMBUS_ASSET_NAME), None)
+    if not match:
+        raise ValueError(f"Expected ViGEmBus asset {m.VIGEMBUS_ASSET_NAME} missing from {m.VIGEMBUS_TAG}")
+    if match.get("browser_download_url") != m.VIGEMBUS_URL:
+        raise ValueError("Unexpected ViGEmBus download URL")
+    if int(match.get("size") or 0) != m.VIGEMBUS_SIZE:
+        raise ValueError(f"Unexpected ViGEmBus asset size: {match.get('size')}")
+    return f"ViGEmBus {m.VIGEMBUS_TAG} OK"
+
+
 def verify_live_releases() -> None:
     m = load_updater()
     raw = m.fetch_releases(timeout=20.0)
@@ -67,7 +87,8 @@ def verify_live_releases() -> None:
 
     linux_summary = _check_platform(m, raw, recent, windows=False)
     win_summary = _check_platform(m, raw, recent, windows=True)
-    print(f"OK: {linux_summary} | {win_summary}")
+    vigem_summary = _check_vigembus(m)
+    print(f"OK: {linux_summary} | {win_summary} | {vigem_summary}")
     print("Metadata only: no package downloads, installations, or repo changes.")
 
 

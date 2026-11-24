@@ -282,6 +282,24 @@ class VibepolloUpdaterTests(unittest.TestCase):
         msi_only = [{"version": "2.18.9.0", "msi": True, "system_component": True}]
         self.assertEqual(m.summarize_windows_installs(msi_only), ("2.18.9.0", False))
 
+    def test_vigembus_summary_and_pinned_metadata(self) -> None:
+        m = _load_mod()
+        self.assertEqual(m.VIGEMBUS_VERSION, "1.22.0")
+        self.assertRegex(m.VIGEMBUS_SHA256, r"^[0-9a-f]{64}$")
+        self.assertTrue(m.VIGEMBUS_URL.startswith("https://github.com/nefarius/ViGEmBus/releases/download/v1.22.0/"))
+        missing = m.summarize_vigembus(None, "not installed")
+        self.assertFalse(missing["installed"])
+        self.assertFalse(missing["needs_update"])
+        self.assertIn("not installed", missing["summary"])
+        older = m.summarize_vigembus("1.17.333", "running")
+        self.assertTrue(older["installed"])
+        self.assertTrue(older["needs_update"])
+        self.assertIn("twice", older["summary"])
+        current = m.summarize_vigembus("1.22.0", "running")
+        self.assertTrue(current["installed"])
+        self.assertFalse(current["needs_update"])
+        self.assertEqual(current["summary"], "1.22.0 (running)")
+
     def test_parse_safe_vibepollo_conflicts_allows_only_vibepollo_vibeshine_paths(self) -> None:
         m = _load_mod()
         good_out = (

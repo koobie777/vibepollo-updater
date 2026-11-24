@@ -21,6 +21,7 @@ So I made one. This is an **unofficial, community-made installer and updater** f
 | **Choose a specific version** | Browse up to the 100 most recent GitHub releases, including older builds. |
 | **Roll back** | Reinstall a previously downloaded package from the local cache (up to three builds are kept). |
 | **Windows config safety** | Backs up `%ProgramFiles%\Apollo\config` before running the Windows installer, warns on stacked duplicate installs, and shows `ApolloService` status. |
+| **Windows ViGEmBus helper** | Detects [ViGEmBus v1.22.0](https://github.com/nefarius/ViGEmBus/releases/tag/v1.22.0) (final release, SHA-256 pinned) and installs or updates it on demand for Xbox 360 / DS4 / auto gamepad emulation. |
 | **See what you're getting** | Read release notes, package details, and the SHA-256 digest before installation. |
 | **Use the GUI or terminal** | PySide6 desktop app, plus a Python-standard-library CLI. |
 
@@ -113,6 +114,9 @@ vibepollo-updater --update stable --allow-downgrade
 
 # Windows only: run upstream's installer silently (/qn /norestart)
 vibepollo-updater --update latest --silent
+
+# Windows only: download, verify SHA-256, and install ViGEmBus v1.22.0
+vibepollo-updater --install-vigembus
 ```
 
 For compatibility with older scripts, `--update prerelease` and `--update nightly` still select the newest GitHub prerelease. Their names are **legacy aliases**, not separate modern release channels.

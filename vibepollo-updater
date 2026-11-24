@@ -48,6 +48,15 @@ WIN_INSTALL_DIR = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "A
 WIN_SERVICE = "ApolloService"
 WIN_SETUP_RE = re.compile(r"^VibepolloSetup(?:-v?[0-9][0-9A-Za-z.+-]*)?\.exe$", re.IGNORECASE)
 WIN_CACHED_RE = re.compile(r"^VibepolloSetup-.+\.exe$", re.IGNORECASE)   # cached copies carry their tag
+# ViGEmBus is permanently EOL at v1.22.0 (2023-11-02); GitHub did not publish an API digest for 2023 assets, so we pin its SHA-256.
+VIGEMBUS_VERSION = "1.22.0"
+VIGEMBUS_TAG = "v1.22.0"
+VIGEMBUS_REPO = "nefarius/ViGEmBus"
+VIGEMBUS_ASSET_NAME = "ViGEmBus_1.22.0_x64_x86_arm64.exe"
+VIGEMBUS_URL = f"https://github.com/{VIGEMBUS_REPO}/releases/download/{VIGEMBUS_TAG}/{VIGEMBUS_ASSET_NAME}"
+VIGEMBUS_RELEASE_URL = f"https://github.com/{VIGEMBUS_REPO}/releases/tag/{VIGEMBUS_TAG}"
+VIGEMBUS_SIZE = 6278576
+VIGEMBUS_SHA256 = "89220a7865076b342892f98865f3499fb7c4cfd673159e89d352c360fd014c6a"
 VIBEPOLLO_DESKTOP_SRC = Path("/usr/share/applications/io.github.Nonary.vibepollo.desktop")
 VIBEPOLLO_DESKTOP_ICON = Path.home() / "Desktop" / "io.github.Nonary.vibepollo.desktop"
 PKG_RE = re.compile(r"^vibepollo-.+-x86_64\.pkg\.tar(\.zst|\.xz)?$", re.IGNORECASE)
@@ -234,6 +243,104 @@ def installed_version() -> str | None:
     except OSError:
         pass
     return None
+
+
+def summarize_vigembus(version: str | None, service_state: str) -> dict[str, Any]:
+    """Summarize Windows ViGEmBus driver state vs final release v1.22.0."""
+    ver = (version or "").strip() or None
+    svc = (service_state or "unknown").strip().lower()
+    installed = bool(ver) or svc in ("running", "stopped")
+    cur_num = numeric_version(ver) if ver else None
+    target_num = numeric_version(VIGEMBUS_VERSION) or (1, 22, 0)
+    needs_update = bool(installed and cur_num is not None and cur_num < target_num)
+    if not installed:
+        summary = f"not installed (v{VIGEMBUS_VERSION} available)"
+    elif needs_update:
+        summary = f"{ver} ({svc}) · v{VIGEMBUS_VERSION} available (in-place upgrade may need running setup twice)"
+    elif ver:
+        summary = f"{ver} ({svc})"
+    else:
+        summary = f"installed ({svc})"
+    return {
+        "installed": installed,
+        "version": ver,
+        "service": svc,
+        "target": VIGEMBUS_VERSION,
+        "needs_update": needs_update,
+        "summary": summary,
+        "release_url": VIGEMBUS_RELEASE_URL,
+    }
+
+
+def vigembus_status() -> dict[str, Any]:
+    """Detect Windows ViGEmBus v1.x (separate from Nefarius VirtualPad G2) and its driver service."""
+    if not WINDOWS:
+        return {
+            "installed": False,
+            "version": None,
+            "service": "n/a",
+            "target": VIGEMBUS_VERSION,
+            "needs_update": False,
+            "summary": "Windows only",
+            "release_url": VIGEMBUS_RELEASE_URL,
+        }
+    import winreg  # noqa: PLC0415 - Windows only
+
+    version: str | None = None
+    # 1. Official ViGEmBus key named in nefarius/ViGEmBus v1.22.0 release metadata
+    for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        for subkey in (
+            r"SOFTWARE\Nefarius Software Solutions e.U.\ViGEm Bus Driver",
+            r"SOFTWARE\WOW6432Node\Nefarius Software Solutions e.U.\ViGEm Bus Driver",
+        ):
+            try:
+                with winreg.OpenKey(hive, subkey) as k:
+                    v = str(winreg.QueryValueEx(k, "Version")[0]).strip()
+                    if v:
+                        version = v
+                        break
+            except OSError:
+                continue
+        if version:
+            break
+
+    # 2. Fallback: Uninstall entries for ViGEmBus v1.x (explicitly skip Nefarius VirtualPad G2)
+    if not version:
+        for hive, path in (
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+        ):
+            try:
+                parent = winreg.OpenKey(hive, path)
+            except OSError:
+                continue
+            with parent:
+                for i in range(winreg.QueryInfoKey(parent)[0]):
+                    try:
+                        sub = winreg.EnumKey(parent, i)
+                        with winreg.OpenKey(parent, sub) as k:
+                            dn = str(winreg.QueryValueEx(k, "DisplayName")[0]).strip()
+                            low = dn.lower()
+                            if "virtualpad" in low or "g2" in low:
+                                continue
+                            if "vigem" in low or "virtual gamepad emulation bus driver" in low:
+                                dv = str(winreg.QueryValueEx(k, "DisplayVersion")[0]).strip()
+                                if dv:
+                                    version = dv
+                                    break
+                    except OSError:
+                        continue
+            if version:
+                break
+
+    svc_state = "unknown"
+    try:
+        r = subprocess.run(["sc", "query", "ViGEmBus"], capture_output=True, text=True, timeout=5, check=False)
+        m = re.search(r"STATE\s*:\s*\d+\s+(\w+)", r.stdout or "")
+        svc_state = m.group(1).lower() if m else "not installed"
+    except OSError:
+        svc_state = "unknown"
+    return summarize_vigembus(version, svc_state)
 
 
 def service_status() -> str:
@@ -662,6 +769,99 @@ def install_windows(setup: Path, *, silent: bool = False) -> tuple[int, str]:
     return rc, "\n".join(lines)
 
 
+def download_and_verify_vigembus(*, cache_dir: Path = CACHE_DIR, progress_cb=None) -> Path:
+    """Download ViGEmBus v1.22.0 from GitHub Releases and verify its pinned SHA-256."""
+    rel = {
+        "tag": VIGEMBUS_TAG,
+        "asset": {
+            "name": VIGEMBUS_ASSET_NAME,
+            "url": VIGEMBUS_URL,
+            "size": VIGEMBUS_SIZE,
+            "sha256": VIGEMBUS_SHA256,
+        },
+    }
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    dest = cache_dir / VIGEMBUS_ASSET_NAME
+    if dest.is_file() and sha256_file(dest) == VIGEMBUS_SHA256:
+        if progress_cb:
+            progress_cb(100, f"Verified cached {dest.name} (SHA-256 OK)")
+        return dest
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    req = urllib.request.Request(VIGEMBUS_URL, headers={"User-Agent": f"vibepollo-updater/{__version__}"})
+    total = VIGEMBUS_SIZE
+    done = 0
+    last_pct = -1
+    with urllib.request.urlopen(req, timeout=60) as resp, tmp.open("wb") as out:
+        cl = int(resp.headers.get("Content-Length") or 0)
+        if cl:
+            total = cl
+        while True:
+            chunk = resp.read(256 * 1024)
+            if not chunk:
+                break
+            out.write(chunk)
+            done += len(chunk)
+            if progress_cb and total > 0:
+                pct = int(min(99, (done * 100) // total))
+                if pct != last_pct:
+                    last_pct = pct
+                    progress_cb(pct, f"Downloading {dest.name}: {done / (1024*1024):.1f} / {total / (1024*1024):.1f} MiB")
+    try:
+        actual = verify_file_sha256(tmp, VIGEMBUS_SHA256)
+    except ValueError:
+        tmp.unlink(missing_ok=True)
+        raise
+    tmp.replace(dest)
+    if progress_cb:
+        progress_cb(100, f"Verified {dest.name} (SHA-256 {actual[:16]}...)")
+    return dest
+
+
+WIN_VIGEM_PS = r"""
+param([string]$Setup, [string]$Result, [switch]$Silent)
+$ErrorActionPreference = 'Continue'
+if ($Silent) {
+    $p = Start-Process -FilePath $Setup -ArgumentList @('/exenoui', '/qn', '/norestart') -Wait -PassThru
+} else {
+    $p = Start-Process -FilePath $Setup -Wait -PassThru
+}
+"$($p.ExitCode)" | Set-Content -LiteralPath $Result
+"""
+
+
+def install_vigembus(setup: Path, *, silent: bool = False) -> tuple[int, str]:
+    """Run ViGEmBus v1.22.0 installer elevated (one UAC prompt). Returns (exit code, report)."""
+    if not WINDOWS:
+        return 2, "ViGEmBus is a Windows-only gamepad driver."
+    if not setup.is_file():
+        return 2, f"ViGEmBus installer not found: {setup}"
+    before = vigembus_status()
+    work = Path(tempfile.mkdtemp(prefix="vibepollo-vigem-"))
+    script, result = work / "install-vigem.ps1", work / "result.txt"
+    script.write_text(WIN_VIGEM_PS, encoding="utf-8")
+    silent_flag = " -Silent" if silent else ""
+    args = f'-NoProfile -ExecutionPolicy Bypass -File "{script}" -Setup "{setup}" -Result "{result}"{silent_flag}'
+    cmd = ["powershell", "-NoProfile", "-Command",
+           f"Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList {_ps_quote(args)}"]
+    r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if not result.is_file():
+        shutil.rmtree(work, ignore_errors=True)
+        return 1223, "Cancelled: Windows did not run the ViGEmBus installer (UAC declined?).\n" + (r.stderr or "").strip()
+    text = result.read_text(encoding="utf-8", errors="replace").strip()
+    shutil.rmtree(work, ignore_errors=True)
+    rc = int(text) if text.lstrip("-").isdigit() else 1
+    after = vigembus_status()
+    lines = [
+        f"ViGEmBus installer {setup.name} exited {rc}.",
+        f"ViGEmBus now: {after['summary']}",
+    ]
+    if rc == 3010:
+        lines.append("Windows restart required to finish ViGEmBus driver setup.")
+    if before.get("needs_update") and after.get("needs_update"):
+        lines.append("Note: upstream v1.22.0 in-place upgrades can require running the ViGEmBus installer a second time.")
+    return rc, "\n".join(lines)
+
+
 def install_package(
     pkg_path: Path,
     *,
@@ -691,6 +891,7 @@ def install_package(
 def cli_check(as_json: bool = False) -> int:
     cur = installed_version()
     svc = service_status()
+    vg = vigembus_status() if WINDOWS else None
     raw = fetch_releases()
     ch = parse_channels(raw)
     cached = [p.name for p in list_cached_packages()]
@@ -718,10 +919,15 @@ def cli_check(as_json: bool = False) -> int:
         ],
         "cached_rollbacks": cached,
     }
+    if vg is not None:
+        payload["vigembus"] = vg
     if as_json:
         print(json.dumps(payload, indent=2))
         return 0
     print(f"Vibepollo Installed : {cur or 'NOT INSTALLED'} ({svc})")
+    if vg is not None:
+        hint = "  (install: vibepollo-updater --install-vigembus)" if (not vg["installed"] or vg["needs_update"]) else ""
+        print(f"ViGEmBus Driver     : {vg['summary']}{hint}")
     print(f"Upstream Repo       : https://github.com/{REPO}")
     for key in CHANNELS:
         v = ch.get(key)
@@ -835,6 +1041,22 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             except Exception as exc:
                 self.finished_install.emit(1, str(exc), pkg)
 
+    class ViGEmWorker(QThread):
+        progress = Signal(int, str)
+        finished_vigem = Signal(int, str)
+
+        def __init__(self, parent=None) -> None:
+            super().__init__(parent)
+
+        def run(self) -> None:
+            try:
+                setup = download_and_verify_vigembus(progress_cb=lambda p, m: self.progress.emit(p, m))
+                self.progress.emit(100, f"Running {setup.name} (approve the Windows prompt)...")
+                rc, out = install_vigembus(setup, silent=False)
+                self.finished_vigem.emit(rc, out)
+            except Exception as exc:
+                self.finished_vigem.emit(1, str(exc))
+
     class UpdaterWindow(QMainWindow):
         def __init__(self) -> None:
             super().__init__()
@@ -934,6 +1156,21 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             self.icon_chk.toggled.connect(self._toggle_desktop_icon)
             lay.addWidget(self.icon_chk)
 
+            # Windows optional gamepad dependency: ViGEmBus v1.22.0 (final release)
+            self.vigem_box = QFrame()
+            self.vigem_box.setObjectName("ChannelCard")
+            self.vigem_box.setVisible(WINDOWS)
+            vgl = QHBoxLayout(self.vigem_box)
+            vgl.setContentsMargins(10, 6, 10, 6)
+            self.vigem_lbl = QLabel("")
+            self.vigem_lbl.setStyleSheet("color: #d6e4f0; font-weight: 600;")
+            self.vigem_btn = QPushButton(f"Install ViGEmBus v{VIGEMBUS_VERSION}")
+            self.vigem_btn.setToolTip(f"Download & verify official ViGEmBus {VIGEMBUS_TAG} ({VIGEMBUS_RELEASE_URL})")
+            self.vigem_btn.clicked.connect(self.start_vigembus)
+            vgl.addWidget(self.vigem_lbl, 1)
+            vgl.addWidget(self.vigem_btn)
+            lay.addWidget(self.vigem_box)
+
             self.status_lbl = QLabel("Ready. No changes are made until you click Install.")
             self.status_lbl.setStyleSheet("color: #e8b84b;")
             lay.addWidget(self.status_lbl)
@@ -971,6 +1208,16 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             for p in cached:
                 self.rollback_combo.addItem(p.name, str(p))
             self.rollback_btn.setEnabled(bool(cached))
+            if WINDOWS:
+                vg = vigembus_status()
+                self.vigem_lbl.setText(f"ViGEmBus (gamepad driver): {vg['summary']}")
+                if not vg["installed"]:
+                    self.vigem_btn.setText(f"Install ViGEmBus v{VIGEMBUS_VERSION}")
+                elif vg["needs_update"]:
+                    self.vigem_btn.setText(f"Update ViGEmBus to v{VIGEMBUS_VERSION}")
+                else:
+                    self.vigem_btn.setText(f"Reinstall ViGEmBus v{VIGEMBUS_VERSION}")
+                self.vigem_btn.setEnabled(True)
 
         def selected_channel(self) -> str:
             for k, rb in self.radios.items():
@@ -1139,6 +1386,53 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
                 return
             self._run_worker(InstallWorker(rel=None, local_pkg=pkg, parent=self))
 
+        def start_vigembus(self) -> None:
+            if not WINDOWS or self._busy():
+                return
+            vg = vigembus_status()
+            extra = (
+                "\n\nNote: ViGEmBus v1.22.0's release notes mention that in-place upgrades "
+                "over older versions may require running the setup twice."
+                if vg.get("needs_update") else ""
+            )
+            ans = QMessageBox.question(
+                self,
+                f"Install ViGEmBus v{VIGEMBUS_VERSION}",
+                f"Download, verify SHA-256, and run the official ViGEmBus {VIGEMBUS_TAG} installer?\n\n"
+                f"  {VIGEMBUS_ASSET_NAME}\n  {VIGEMBUS_RELEASE_URL}{extra}\n\nProceed?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if ans != QMessageBox.Yes:
+                return
+            self.install_btn.setEnabled(False)
+            self.rollback_btn.setEnabled(False)
+            self.refresh_btn.setEnabled(False)
+            self.vigem_btn.setEnabled(False)
+            self.pbar.setValue(0)
+            w = ViGEmWorker(parent=self)
+            self._adopt(w)
+            w.progress.connect(self._on_progress, Qt.ConnectionType.QueuedConnection)
+            w.finished_vigem.connect(self._on_vigem_done, Qt.ConnectionType.QueuedConnection)
+            w.start()
+
+        def _on_vigem_done(self, rc: int, out: str) -> None:
+            worker = self.sender()
+            if isinstance(worker, QThread):
+                worker.wait(60_000)
+            self.refresh_btn.setEnabled(True)
+            self._refresh_local_state()
+            self._update_preview()
+            self.notes.appendPlainText(f"\n--- ViGEmBus installer output (exit {rc}) ---\n{out}")
+            if rc == 0:
+                self.pbar.setValue(100)
+                self.status_lbl.setText(f"ViGEmBus v{VIGEMBUS_VERSION} installed.")
+            elif rc == 3010:
+                self.pbar.setValue(100)
+                self.status_lbl.setText(f"ViGEmBus v{VIGEMBUS_VERSION} installed (restart Windows to finish).")
+            else:
+                self.status_lbl.setText(f"ViGEmBus installer exited with code {rc} (see log above).")
+
         def _on_progress(self, pct: int, message: str) -> None:
             self.pbar.setValue(pct)
             self.status_lbl.setText(message)
@@ -1150,6 +1444,7 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             self.install_btn.setEnabled(False)
             self.rollback_btn.setEnabled(False)
             self.refresh_btn.setEnabled(False)
+            self.vigem_btn.setEnabled(False)
             self.pbar.setValue(0)
             self._adopt(w)
             w.progress.connect(self._on_progress, Qt.ConnectionType.QueuedConnection)
@@ -1227,6 +1522,7 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--json", action="store_true", help="show release check output as JSON")
     mode.add_argument("--update", choices=CLI_CHANNELS, help="install stable or latest (prerelease/nightly are legacy aliases)")
     mode.add_argument("--rollback", action="store_true", help="reinstall newest cached fallback package")
+    mode.add_argument("--install-vigembus", action="store_true", help="Windows only: download, verify SHA-256, and install ViGEmBus v1.22.0")
     mode.add_argument("--smoke-offscreen", action="store_true", help="headless Qt GUI verification")
     mode.add_argument("--desktop-icon", choices=("on", "off", "status"), help="optional Vibepollo launcher on the Desktop")
     parser.add_argument("--stable-only", action="store_true", help="with --list, hide pre-releases")
@@ -1300,6 +1596,14 @@ def main(argv: list[str] | None = None) -> int:
         rc, out = install_package(cached[0], use_pkexec=False, silent=ns.silent)
         print(out)
         return 0 if (WINDOWS and rc == 3010) else rc
+    if ns.install_vigembus:
+        if not WINDOWS:
+            print("ViGEmBus is a Windows-only gamepad driver.", file=sys.stderr)
+            return 2
+        setup = download_and_verify_vigembus(progress_cb=lambda p, m: print(f"[{p:3d}%] {m}"))
+        rc, out = install_vigembus(setup, silent=ns.silent)
+        print(out)
+        return 0 if rc == 3010 else rc
     return launch_gui(smoke_offscreen=ns.smoke_offscreen)
 
 
