@@ -22,6 +22,59 @@ def load_updater():
     return mod
 
 
+def _check_platform(m, raw: list[dict], recent: list[dict], *, windows: bool) -> str:
+    label = "Windows" if windows else "Linux"
+    pat = m.WIN_SETUP_RE if windows else m.PKG_RE
+    checked = 0
+    for release in recent:
+        assets = release.get("assets") or []
+        matching = [a for a in assets if isinstance(a, dict) and pat.fullmatch(str(a.get("name") or ""))]
+        if not matching:
+            continue  # Some upstream releases may omit one platform's asset.
+        entry = m.release_entry(release, windows=windows)
+        if entry is None:
+            raise ValueError(f"Unrecognized upstream {label} release metadata: {release.get('tag_name', '(missing tag)')}")
+        asset = entry["asset"]
+        if not re.fullmatch(r"[a-f0-9]{64}", asset.get("sha256") or ""):
+            raise ValueError(f"Missing or malformed {label} SHA-256: {entry['tag']}")
+        uri = urlsplit(asset["url"])
+        expected_path = f"/{m.REPO}/releases/download/"
+        if (uri.scheme != "https" or uri.hostname != "github.com"
+                or not uri.path.startswith(expected_path)
+                or uri.username is not None or uri.password is not None):
+            raise ValueError(f"Unexpected upstream {label} download URL: {entry['tag']}")
+        checked += 1
+
+    if not checked:
+        raise ValueError(f"No usable {label} assets found in recent releases")
+    channels = m.parse_channels(raw, windows=windows)
+    if not channels["latest"]:
+        raise ValueError(f"Cannot select the latest installable {label} release")
+    if not channels["stable"]:
+        raise ValueError(f"Cannot select a stable installable {label} release")
+    return f"{label}: {checked} assets (stable={channels['stable']['tag']}, latest={channels['latest']['tag']})"
+
+
+def _check_vigembus(m) -> str:
+    import json
+    import urllib.request
+    req = urllib.request.Request(
+        f"https://api.github.com/repos/{m.VIGEMBUS_REPO}/releases/tags/{m.VIGEMBUS_TAG}",
+        headers={"Accept": "application/vnd.github+json", "User-Agent": f"vibepollo-updater/{m.__version__}"},
+    )
+    with urllib.request.urlopen(req, timeout=20.0) as resp:
+        rel = json.loads(resp.read().decode("utf-8", "replace"))
+    assets = rel.get("assets") or []
+    match = next((a for a in assets if isinstance(a, dict) and a.get("name") == m.VIGEMBUS_ASSET_NAME), None)
+    if not match:
+        raise ValueError(f"Expected ViGEmBus asset {m.VIGEMBUS_ASSET_NAME} missing from {m.VIGEMBUS_TAG}")
+    if match.get("browser_download_url") != m.VIGEMBUS_URL:
+        raise ValueError("Unexpected ViGEmBus download URL")
+    if int(match.get("size") or 0) != m.VIGEMBUS_SIZE:
+        raise ValueError(f"Unexpected ViGEmBus asset size: {match.get('size')}")
+    return f"ViGEmBus {m.VIGEMBUS_TAG} OK"
+
+
 def verify_live_releases() -> None:
     m = load_updater()
     raw = m.fetch_releases(timeout=20.0)
@@ -32,36 +85,10 @@ def verify_live_releases() -> None:
     if not recent:
         raise ValueError("No published GitHub releases among the first 20 results")
 
-    checked = 0
-    for release in recent:
-        assets = release.get("assets") or []
-        linux_packages = [a for a in assets if isinstance(a, dict) and m.PKG_RE.fullmatch(str(a.get("name") or ""))]
-        if not linux_packages:
-            continue  # Some upstream releases may have no Linux package.
-        entry = m.release_entry(release)
-        if entry is None:
-            raise ValueError(f"Unrecognized upstream release metadata: {release.get('tag_name', '(missing tag)')}")
-        asset = entry["asset"]
-        if not re.fullmatch(r"[a-f0-9]{64}", asset.get("sha256") or ""):
-            raise ValueError(f"Missing or malformed SHA-256: {entry['tag']}")
-        uri = urlsplit(asset["url"])
-        expected_path = f"/{m.REPO}/releases/download/"
-        if (uri.scheme != "https" or uri.hostname != "github.com"
-                or not uri.path.startswith(expected_path)
-                or uri.username is not None or uri.password is not None):
-            raise ValueError(f"Unexpected upstream package download URL: {entry['tag']}")
-        checked += 1
-
-    if not checked:
-        raise ValueError("No usable x86_64 Arch packages found in recent releases")
-    channels = m.parse_channels(raw)
-    if not channels["latest"]:
-        raise ValueError("Cannot select the latest installable release")
-    if not channels["stable"]:
-        raise ValueError("Cannot select a stable installable release")
-
-    print(f"OK: checked {checked} recent Linux release assets; "
-          f"stable={channels['stable']['tag']}, latest={channels['latest']['tag']}")
+    linux_summary = _check_platform(m, raw, recent, windows=False)
+    win_summary = _check_platform(m, raw, recent, windows=True)
+    vigem_summary = _check_vigembus(m)
+    print(f"OK: {linux_summary} | {win_summary} | {vigem_summary}")
     print("Metadata only: no package downloads, installations, or repo changes.")
 
 

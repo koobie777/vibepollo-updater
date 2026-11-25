@@ -1,37 +1,62 @@
 #!/usr/bin/env python3
 """Vibepollo Installer & Updater — numeric releases with Stable/Latest selection, SHA-256 verification and rollback.
 
-Installs or updates Vibepollo (https://github.com/Nonary/Vibepollo) on Arch Linux and Arch-based
-distributions (EndeavourOS, CachyOS, Manjaro, SteamOS). Upstream's Linux beta ships only an
-x86_64 pacman package. Debian, Fedora, AppImage, and Flatpak builds are not published, so this
-tool refuses to install on those distros instead of pretending a package exists.
+Installs or updates Vibepollo (https://github.com/Nonary/Vibepollo) on Windows and on Arch Linux
+and Arch-based distributions (EndeavourOS, CachyOS, Manjaro, SteamOS). Upstream's Linux beta ships
+only an x86_64 pacman package. Debian, Fedora, AppImage, and Flatpak builds are not published, so
+this tool refuses to install on those distros instead of pretending a package exists.
 
 - Uses GitHub release metadata (not tag naming) to distinguish time-gated Stable from Latest.
 - Lists every release, pre-releases included, so any specific version can be installed (`--list`, `--install-version`).
-- Matches the official x86_64 Arch package (`vibepollo-*-x86_64.pkg.tar.zst`).
+- Linux: matches the official x86_64 Arch package (`vibepollo-*-x86_64.pkg.tar.zst`), installs via
+  `pkexec pacman -U` (GUI) or `sudo pacman -U` (CLI), caches in `~/.cache/vibepollo-updater/`.
+- Windows: matches the official `VibepolloSetup*.exe`, backs up `config` first, runs the installer
+  elevated (one UAC prompt), caches in `%LOCALAPPDATA%\\vibepollo-updater\\cache\\`.
 - Verifies the GitHub-attested SHA-256 digest before installing (refuses on mismatch).
-- Installs via `pkexec pacman -U` in GUI mode or `sudo pacman -U` in CLI mode.
-- Keeps the last 3 verified packages cached in `~/.cache/vibepollo-updater/` for 1-click rollback.
+- Keeps the last 3 verified packages cached for 1-click rollback.
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 import urllib.error
 import urllib.request
 from typing import Any
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
+WINDOWS = sys.platform == "win32"
 REPO = "Nonary/Vibepollo"
 RELEASES_API = f"https://api.github.com/repos/{REPO}/releases?per_page=100"
-CACHE_DIR = Path.home() / ".cache/vibepollo-updater"
+if WINDOWS:
+    _LOCAL = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData/Local"))
+    CACHE_DIR = _LOCAL / "vibepollo-updater" / "cache"
+    CONFIG_BACKUP_DIR = _LOCAL / "vibepollo-updater" / "config-backups"
+else:
+    CACHE_DIR = Path.home() / ".cache/vibepollo-updater"
+    CONFIG_BACKUP_DIR = CACHE_DIR / "config-backups"
+WIN_INSTALL_DIR = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Apollo"   # upstream keeps Apollo's folder
+WIN_SERVICE = "ApolloService"
+WIN_SETUP_RE = re.compile(r"^VibepolloSetup(?:-v?[0-9][0-9A-Za-z.+-]*)?\.exe$", re.IGNORECASE)
+WIN_CACHED_RE = re.compile(r"^VibepolloSetup-.+\.exe$", re.IGNORECASE)   # cached copies carry their tag
+# ViGEmBus is permanently EOL at v1.22.0 (2023-11-02); GitHub did not publish an API digest for 2023 assets, so we pin its SHA-256.
+VIGEMBUS_VERSION = "1.22.0"
+VIGEMBUS_TAG = "v1.22.0"
+VIGEMBUS_REPO = "nefarius/ViGEmBus"
+VIGEMBUS_ASSET_NAME = "ViGEmBus_1.22.0_x64_x86_arm64.exe"
+VIGEMBUS_URL = f"https://github.com/{VIGEMBUS_REPO}/releases/download/{VIGEMBUS_TAG}/{VIGEMBUS_ASSET_NAME}"
+VIGEMBUS_RELEASE_URL = f"https://github.com/{VIGEMBUS_REPO}/releases/tag/{VIGEMBUS_TAG}"
+VIGEMBUS_SIZE = 6278576
+VIGEMBUS_SHA256 = "89220a7865076b342892f98865f3499fb7c4cfd673159e89d352c360fd014c6a"
 VIBEPOLLO_DESKTOP_SRC = Path("/usr/share/applications/io.github.Nonary.vibepollo.desktop")
 VIBEPOLLO_DESKTOP_ICON = Path.home() / "Desktop" / "io.github.Nonary.vibepollo.desktop"
 PKG_RE = re.compile(r"^vibepollo-.+-x86_64\.pkg\.tar(\.zst|\.xz)?$", re.IGNORECASE)
@@ -136,8 +161,77 @@ QRadioButton {
 """
 
 
+def platform_supported() -> bool:
+    """Windows, or an Arch-family Linux: the two places upstream publishes an installer."""
+    return WINDOWS or linux_family() == "arch"
+
+
+def windows_installs() -> list[dict[str, Any]]:
+    """Every 'Vibepollo' entry in Windows' installed-programs list."""
+    if not WINDOWS:
+        return []
+    import winreg  # noqa: PLC0415 - Windows only
+
+    out: list[dict[str, Any]] = []
+    roots = (
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+    )
+    for hive, path in roots:
+        try:
+            parent = winreg.OpenKey(hive, path)
+        except OSError:
+            continue
+        with parent:
+            for i in range(winreg.QueryInfoKey(parent)[0]):
+                try:
+                    sub = winreg.EnumKey(parent, i)
+                    with winreg.OpenKey(parent, sub) as k:
+                        vals: dict[str, Any] = {}
+                        for name in ("DisplayName", "DisplayVersion", "UninstallString", "InstallLocation"):
+                            try:
+                                vals[name] = str(winreg.QueryValueEx(k, name)[0])
+                            except OSError:
+                                vals[name] = ""
+                        try:
+                            vals["SystemComponent"] = int(winreg.QueryValueEx(k, "SystemComponent")[0]) == 1
+                        except (OSError, ValueError, TypeError):
+                            vals["SystemComponent"] = False
+                except OSError:
+                    continue
+                if vals["DisplayName"].strip().lower() != "vibepollo":
+                    continue
+                out.append({
+                    "key": sub,
+                    "version": vals["DisplayVersion"],
+                    "msi": "msiexec" in vals["UninstallString"].lower(),
+                    "system_component": bool(vals["SystemComponent"]),
+                    "uninstall": vals["UninstallString"],
+                    "location": vals["InstallLocation"],
+                })
+    return out
+
+
+def summarize_windows_installs(entries: list[dict[str, Any]]) -> tuple[str | None, bool]:
+    """Return (version, stacked). A normal install has 1 visible bootstrapper entry plus 1 hidden MSI (SystemComponent=1)."""
+    if not entries:
+        return None, False
+    visible = [e for e in entries if not e.get("system_component")]
+    msi_count = sum(1 for e in entries if e.get("msi"))
+    stacked = len(visible) > 1 or msi_count > 1
+    pool = visible or entries
+    vers = [str(e.get("version") or "").strip() for e in pool if str(e.get("version") or "").strip()]
+    if not vers:
+        return None, stacked
+    return max(vers, key=lambda v: numeric_version(v) or (0, 0, 0)), stacked
+
+
 def installed_version() -> str | None:
-    """Return installed pacman version of `vibepollo`, or None if not installed."""
+    """Return the installed Vibepollo version (pacman on Linux, the programs list on Windows), or None."""
+    if WINDOWS:
+        ver, _ = summarize_windows_installs(windows_installs())
+        return ver
     try:
         r = subprocess.run(
             ["pacman", "-Q", "vibepollo"],
@@ -151,8 +245,115 @@ def installed_version() -> str | None:
     return None
 
 
+def summarize_vigembus(version: str | None, service_state: str) -> dict[str, Any]:
+    """Summarize Windows ViGEmBus driver state vs final release v1.22.0."""
+    ver = (version or "").strip() or None
+    svc = (service_state or "unknown").strip().lower()
+    installed = bool(ver) or svc in ("running", "stopped")
+    cur_num = numeric_version(ver) if ver else None
+    target_num = numeric_version(VIGEMBUS_VERSION) or (1, 22, 0)
+    needs_update = bool(installed and cur_num is not None and cur_num < target_num)
+    if not installed:
+        summary = f"not installed (v{VIGEMBUS_VERSION} available)"
+    elif needs_update:
+        summary = f"{ver} ({svc}) · v{VIGEMBUS_VERSION} available (in-place upgrade may need running setup twice)"
+    elif ver:
+        summary = f"{ver} ({svc})"
+    else:
+        summary = f"installed ({svc})"
+    return {
+        "installed": installed,
+        "version": ver,
+        "service": svc,
+        "target": VIGEMBUS_VERSION,
+        "needs_update": needs_update,
+        "summary": summary,
+        "release_url": VIGEMBUS_RELEASE_URL,
+    }
+
+
+def vigembus_status() -> dict[str, Any]:
+    """Detect Windows ViGEmBus v1.x (separate from Nefarius VirtualPad G2) and its driver service."""
+    if not WINDOWS:
+        return {
+            "installed": False,
+            "version": None,
+            "service": "n/a",
+            "target": VIGEMBUS_VERSION,
+            "needs_update": False,
+            "summary": "Windows only",
+            "release_url": VIGEMBUS_RELEASE_URL,
+        }
+    import winreg  # noqa: PLC0415 - Windows only
+
+    version: str | None = None
+    # 1. Official ViGEmBus key named in nefarius/ViGEmBus v1.22.0 release metadata
+    for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        for subkey in (
+            r"SOFTWARE\Nefarius Software Solutions e.U.\ViGEm Bus Driver",
+            r"SOFTWARE\WOW6432Node\Nefarius Software Solutions e.U.\ViGEm Bus Driver",
+        ):
+            try:
+                with winreg.OpenKey(hive, subkey) as k:
+                    v = str(winreg.QueryValueEx(k, "Version")[0]).strip()
+                    if v:
+                        version = v
+                        break
+            except OSError:
+                continue
+        if version:
+            break
+
+    # 2. Fallback: Uninstall entries for ViGEmBus v1.x (explicitly skip Nefarius VirtualPad G2)
+    if not version:
+        for hive, path in (
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+        ):
+            try:
+                parent = winreg.OpenKey(hive, path)
+            except OSError:
+                continue
+            with parent:
+                for i in range(winreg.QueryInfoKey(parent)[0]):
+                    try:
+                        sub = winreg.EnumKey(parent, i)
+                        with winreg.OpenKey(parent, sub) as k:
+                            dn = str(winreg.QueryValueEx(k, "DisplayName")[0]).strip()
+                            low = dn.lower()
+                            if "virtualpad" in low or "g2" in low:
+                                continue
+                            if "vigem" in low or "virtual gamepad emulation bus driver" in low:
+                                dv = str(winreg.QueryValueEx(k, "DisplayVersion")[0]).strip()
+                                if dv:
+                                    version = dv
+                                    break
+                    except OSError:
+                        continue
+            if version:
+                break
+
+    svc_state = "unknown"
+    try:
+        r = subprocess.run(["sc", "query", "ViGEmBus"], capture_output=True, text=True, timeout=5, check=False)
+        m = re.search(r"STATE\s*:\s*\d+\s+(\w+)", r.stdout or "")
+        svc_state = m.group(1).lower() if m else "not installed"
+    except OSError:
+        svc_state = "unknown"
+    return summarize_vigembus(version, svc_state)
+
+
 def service_status() -> str:
-    """Return systemd status summary for Vibepollo controller & host units."""
+    """Return systemd status summary for Vibepollo controller & host units (the Windows service on Windows)."""
+    if WINDOWS:
+        try:
+            r = subprocess.run(["sc", "query", WIN_SERVICE], capture_output=True, text=True, timeout=5, check=False)
+        except OSError:
+            return "unknown"
+        m = re.search(r"STATE\s*:\s*\d+\s+(\w+)", r.stdout or "")
+        state = m.group(1).lower() if m else "not installed"
+        _, stacked = summarize_windows_installs(windows_installs())
+        return f"{WIN_SERVICE}={state}" + (" · TWO INSTALLS REGISTERED (updates can fail)" if stacked else "")
     try:
         r1 = subprocess.run(
             ["systemctl", "is-active", "vibepollo-session-controller.service"],
@@ -169,11 +370,12 @@ def service_status() -> str:
         return "unknown"
 
 
-def pick_arch_asset(release: dict[str, Any]) -> dict[str, Any] | None:
-    """Find the official x86_64 Arch package asset and its SHA-256 digest."""
+def pick_arch_asset(release: dict[str, Any], *, windows: bool | None = None) -> dict[str, Any] | None:
+    """Find this platform's official asset and its SHA-256: the x86_64 Arch package, or VibepolloSetup*.exe on Windows."""
+    want = WIN_SETUP_RE if (WINDOWS if windows is None else windows) else PKG_RE
     for asset in release.get("assets") or []:
         name = str(asset.get("name") or "")
-        if PKG_RE.match(name):
+        if want.match(name):
             digest = str(asset.get("digest") or "")
             sha256 = digest.split(":", 1)[1].strip().lower() if digest.startswith("sha256:") else ""
             return {
@@ -197,8 +399,8 @@ CHANNELS = ("stable", "latest")
 CLI_CHANNELS = CHANNELS + ("prerelease", "nightly")
 
 
-def release_entry(rel: dict[str, Any]) -> dict[str, Any] | None:
-    """Normalise one GitHub release; None for drafts and releases without an Arch package."""
+def release_entry(rel: dict[str, Any], *, windows: bool | None = None) -> dict[str, Any] | None:
+    """Normalise one GitHub release; None for drafts and releases without an asset for this platform."""
     if not isinstance(rel, dict):
         return None
     # Missing or malformed upstream release flags must never be guessed as "stable".
@@ -208,7 +410,7 @@ def release_entry(rel: dict[str, Any]) -> dict[str, Any] | None:
         return None
     if not str(rel.get("tag_name") or "").strip() or not str(rel.get("published_at") or "").strip():
         return None
-    asset = pick_arch_asset(rel)
+    asset = pick_arch_asset(rel, windows=windows)
     if not asset:
         return None
     return {
@@ -223,28 +425,42 @@ def release_entry(rel: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def parse_releases(releases: list[dict[str, Any]], *, include_prereleases: bool = True) -> list[dict[str, Any]]:
+def parse_releases(
+    releases: list[dict[str, Any]],
+    *,
+    include_prereleases: bool = True,
+    windows: bool | None = None,
+) -> list[dict[str, Any]]:
     """Every installable release, newest first, pre-releases included unless asked not to."""
-    out = [e for e in (release_entry(r) for r in releases) if e]
+    out = [e for e in (release_entry(r, windows=windows) for r in releases) if e]
     if not include_prereleases:
         out = [e for e in out if not e["prerelease"]]
     out.sort(key=lambda e: e["published_at"], reverse=True)
     return out
 
 
-def find_release(releases: list[dict[str, Any]], tag: str) -> dict[str, Any] | None:
+def find_release(
+    releases: list[dict[str, Any]],
+    tag: str,
+    *,
+    windows: bool | None = None,
+) -> dict[str, Any] | None:
     """Match a tag exactly, or with a leading 'v' added or dropped."""
     want = tag.strip().lower().removeprefix("v")
-    for e in parse_releases(releases):
+    for e in parse_releases(releases, windows=windows):
         if e["tag"].lower().removeprefix("v") == want:
             return e
     return None
 
 
-def parse_channels(releases: list[dict[str, Any]]) -> dict[str, dict[str, Any] | None]:
+def parse_channels(
+    releases: list[dict[str, Any]],
+    *,
+    windows: bool | None = None,
+) -> dict[str, dict[str, Any] | None]:
     """Stable is the newest non-prerelease; Latest is the newest published package."""
     channels: dict[str, dict[str, Any] | None] = {k: None for k in CHANNELS}
-    for e in parse_releases(releases):
+    for e in parse_releases(releases, windows=windows):
         if channels["latest"] is None:
             channels["latest"] = dict(e, channel="latest")
         if not e["prerelease"] and channels["stable"] is None:
@@ -252,14 +468,19 @@ def parse_channels(releases: list[dict[str, Any]]) -> dict[str, dict[str, Any] |
     return channels
 
 
-def select_channel(releases: list[dict[str, Any]], channel: str) -> dict[str, Any] | None:
+def select_channel(
+    releases: list[dict[str, Any]],
+    channel: str,
+    *,
+    windows: bool | None = None,
+) -> dict[str, Any] | None:
     """Support legacy --update prerelease/nightly without relying on version suffixes."""
     if channel in ("prerelease", "nightly"):
         return next(
-            (dict(e, channel=channel) for e in parse_releases(releases) if e["prerelease"]),
+            (dict(e, channel=channel) for e in parse_releases(releases, windows=windows) if e["prerelease"]),
             None,
         )
-    return parse_channels(releases).get(channel)
+    return parse_channels(releases, windows=windows).get(channel)
 
 
 def numeric_version(version: str | None) -> tuple[int, int, int] | None:
@@ -303,11 +524,33 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def prune_cache(cache_dir: Path = CACHE_DIR, keep_path: Path | None = None, max_cached: int = MAX_CACHED) -> None:
+def cached_re(*, windows: bool | None = None) -> re.Pattern[str]:
+    """Names of cached installers: pacman packages on Linux, tagged VibepolloSetup-<tag>.exe copies on Windows."""
+    return WIN_CACHED_RE if (WINDOWS if windows is None else windows) else PKG_RE
+
+
+def cached_name(rel: dict[str, Any], *, windows: bool | None = None) -> str:
+    """Upstream calls every Windows build VibepolloSetup.exe, so the cached copy carries the tag."""
+    name = rel["asset"]["name"]
+    is_win = WINDOWS if windows is None else windows
+    if is_win and WIN_SETUP_RE.match(name):
+        tag = re.sub(r"[^0-9A-Za-z.+-]", "_", str(rel.get("tag") or "unknown"))
+        return f"VibepolloSetup-{tag}.exe"
+    return name
+
+
+def prune_cache(
+    cache_dir: Path = CACHE_DIR,
+    keep_path: Path | None = None,
+    max_cached: int = MAX_CACHED,
+    *,
+    windows: bool | None = None,
+) -> None:
     if not cache_dir.is_dir():
         return
+    pat = cached_re(windows=windows)
     pkgs = sorted(
-        [p for p in cache_dir.iterdir() if p.is_file() and PKG_RE.match(p.name)],
+        [p for p in cache_dir.iterdir() if p.is_file() and pat.match(p.name)],
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
@@ -325,11 +568,12 @@ def prune_cache(cache_dir: Path = CACHE_DIR, keep_path: Path | None = None, max_
                 pass
 
 
-def list_cached_packages(cache_dir: Path = CACHE_DIR) -> list[Path]:
+def list_cached_packages(cache_dir: Path = CACHE_DIR, *, windows: bool | None = None) -> list[Path]:
     if not cache_dir.is_dir():
         return []
+    pat = cached_re(windows=windows)
     return sorted(
-        [p for p in cache_dir.iterdir() if p.is_file() and PKG_RE.match(p.name)],
+        [p for p in cache_dir.iterdir() if p.is_file() and pat.match(p.name)],
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
@@ -347,7 +591,7 @@ def verify_file_sha256(path: Path, expected_sha256: str) -> str:
 def download_and_verify(rel: dict[str, Any], *, cache_dir: Path = CACHE_DIR, progress_cb=None) -> Path:
     cache_dir.mkdir(parents=True, exist_ok=True)
     asset = rel["asset"]
-    dest = cache_dir / asset["name"]
+    dest = cache_dir / cached_name(rel)
     expected = str(asset.get("sha256") or "").lower()
     if not re.fullmatch(r"[0-9a-f]{64}", expected):
         raise ValueError("Official release SHA-256 is missing or invalid; refusing to install.")
@@ -435,6 +679,10 @@ def filter_unowned_conflicts(paths: list[str]) -> list[str]:
 def vibepollo_desktop_icon(state: str | None = None, *, src: Path = VIBEPOLLO_DESKTOP_SRC,
                            dst: Path = VIBEPOLLO_DESKTOP_ICON) -> bool:
     """Optional Vibepollo launcher on the Desktop. state 'on'/'off' changes it; returns whether it is there."""
+    if WINDOWS:
+        if state in ("on", "off"):
+            raise OSError("On Windows the Vibepollo installer makes its own shortcuts.")
+        return False
     if state == "on":
         if not src.is_file():
             raise FileNotFoundError(f"{src} not found: install Vibepollo first")
@@ -448,14 +696,183 @@ def vibepollo_desktop_icon(state: str | None = None, *, src: Path = VIBEPOLLO_DE
     return dst.is_file()
 
 
+# Runs elevated (one UAC prompt): copy config aside, then run upstream's own installer and wait for it.
+WIN_INSTALL_PS = r"""
+param([string]$Setup, [string]$Cfg, [string]$Backup, [string]$Result, [switch]$Silent)
+$ErrorActionPreference = 'Continue'
+if (Test-Path -LiteralPath $Cfg) {
+    New-Item -ItemType Directory -Force -Path $Backup | Out-Null
+    robocopy $Cfg $Backup /E /B /COPY:DAT /R:1 /W:1 /NP /NFL /NDL /NJH /NJS | Out-Null
+    if ($LASTEXITCODE -ge 8) { "backup-failed $LASTEXITCODE" | Set-Content -LiteralPath $Result; exit 1 }
+}
+if ($Silent) {
+    $p = Start-Process -FilePath $Setup -ArgumentList @('/qn', '/norestart') -Wait -PassThru
+} else {
+    $p = Start-Process -FilePath $Setup -Wait -PassThru
+}
+"$($p.ExitCode)" | Set-Content -LiteralPath $Result
+"""
+
+
+def _ps_quote(text: str) -> str:
+    return "'" + str(text).replace("'", "''") + "'"
+
+
+def _recent_windows_install_log(since: float) -> Path | None:
+    """Find the newest Vibepollo/Vibeshine MSI log written in %TEMP% since an install started."""
+    temp_dir = Path(tempfile.gettempdir())
+    candidates: list[Path] = []
+    for pat in ("vibeshine_install_*.log", "vibepollo*install*.log", "vibeshine_cli*.log"):
+        for p in temp_dir.glob(pat):
+            try:
+                if p.is_file() and p.stat().st_mtime >= since - 2:
+                    candidates.append(p)
+            except OSError:
+                continue
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def install_windows(setup: Path, *, silent: bool = False) -> tuple[int, str]:
+    """Back up config, then run VibepolloSetup.exe elevated and wait. Returns (exit code, report)."""
+    started = time.time()
+    backup = CONFIG_BACKUP_DIR / time.strftime("%Y%m%d-%H%M%S")
+    work = Path(tempfile.mkdtemp(prefix="vibepollo-updater-"))
+    script, result = work / "install.ps1", work / "result.txt"
+    script.write_text(WIN_INSTALL_PS, encoding="utf-8")
+    silent_flag = " -Silent" if silent else ""
+    args = (f'-NoProfile -ExecutionPolicy Bypass -File "{script}" -Setup "{setup}" '
+            f'-Cfg "{WIN_INSTALL_DIR / "config"}" -Backup "{backup}" -Result "{result}"{silent_flag}')
+    cmd = ["powershell", "-NoProfile", "-Command",
+           f"Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList {_ps_quote(args)}"]
+    r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if not result.is_file():
+        shutil.rmtree(work, ignore_errors=True)
+        return 1223, "Cancelled: Windows did not run the installer (UAC declined?).\n" + (r.stderr or "").strip()
+    text = result.read_text(encoding="utf-8", errors="replace").strip()
+    shutil.rmtree(work, ignore_errors=True)
+    if text.startswith("backup-failed"):
+        return 1, f"Config backup failed ({text}); nothing was installed."
+    rc = int(text) if text.lstrip("-").isdigit() else 1
+    saved = f"Config backed up to {backup}" if backup.is_dir() else "No existing config to back up."
+    lines = [
+        saved,
+        f"Installer {setup.name} exited {rc}. Installed now: {installed_version() or 'none'}",
+    ]
+    if rc == 3010:
+        lines.append("Windows restart required to finish driver setup.")
+    elif rc != 0:
+        log = _recent_windows_install_log(started)
+        if log:
+            lines.append(f"Installer log: {log}")
+    return rc, "\n".join(lines)
+
+
+def download_and_verify_vigembus(*, cache_dir: Path = CACHE_DIR, progress_cb=None) -> Path:
+    """Download ViGEmBus v1.22.0 from GitHub Releases and verify its pinned SHA-256."""
+    rel = {
+        "tag": VIGEMBUS_TAG,
+        "asset": {
+            "name": VIGEMBUS_ASSET_NAME,
+            "url": VIGEMBUS_URL,
+            "size": VIGEMBUS_SIZE,
+            "sha256": VIGEMBUS_SHA256,
+        },
+    }
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    dest = cache_dir / VIGEMBUS_ASSET_NAME
+    if dest.is_file() and sha256_file(dest) == VIGEMBUS_SHA256:
+        if progress_cb:
+            progress_cb(100, f"Verified cached {dest.name} (SHA-256 OK)")
+        return dest
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    req = urllib.request.Request(VIGEMBUS_URL, headers={"User-Agent": f"vibepollo-updater/{__version__}"})
+    total = VIGEMBUS_SIZE
+    done = 0
+    last_pct = -1
+    with urllib.request.urlopen(req, timeout=60) as resp, tmp.open("wb") as out:
+        cl = int(resp.headers.get("Content-Length") or 0)
+        if cl:
+            total = cl
+        while True:
+            chunk = resp.read(256 * 1024)
+            if not chunk:
+                break
+            out.write(chunk)
+            done += len(chunk)
+            if progress_cb and total > 0:
+                pct = int(min(99, (done * 100) // total))
+                if pct != last_pct:
+                    last_pct = pct
+                    progress_cb(pct, f"Downloading {dest.name}: {done / (1024*1024):.1f} / {total / (1024*1024):.1f} MiB")
+    try:
+        actual = verify_file_sha256(tmp, VIGEMBUS_SHA256)
+    except ValueError:
+        tmp.unlink(missing_ok=True)
+        raise
+    tmp.replace(dest)
+    if progress_cb:
+        progress_cb(100, f"Verified {dest.name} (SHA-256 {actual[:16]}...)")
+    return dest
+
+
+WIN_VIGEM_PS = r"""
+param([string]$Setup, [string]$Result, [switch]$Silent)
+$ErrorActionPreference = 'Continue'
+if ($Silent) {
+    $p = Start-Process -FilePath $Setup -ArgumentList @('/exenoui', '/qn', '/norestart') -Wait -PassThru
+} else {
+    $p = Start-Process -FilePath $Setup -Wait -PassThru
+}
+"$($p.ExitCode)" | Set-Content -LiteralPath $Result
+"""
+
+
+def install_vigembus(setup: Path, *, silent: bool = False) -> tuple[int, str]:
+    """Run ViGEmBus v1.22.0 installer elevated (one UAC prompt). Returns (exit code, report)."""
+    if not WINDOWS:
+        return 2, "ViGEmBus is a Windows-only gamepad driver."
+    if not setup.is_file():
+        return 2, f"ViGEmBus installer not found: {setup}"
+    before = vigembus_status()
+    work = Path(tempfile.mkdtemp(prefix="vibepollo-vigem-"))
+    script, result = work / "install-vigem.ps1", work / "result.txt"
+    script.write_text(WIN_VIGEM_PS, encoding="utf-8")
+    silent_flag = " -Silent" if silent else ""
+    args = f'-NoProfile -ExecutionPolicy Bypass -File "{script}" -Setup "{setup}" -Result "{result}"{silent_flag}'
+    cmd = ["powershell", "-NoProfile", "-Command",
+           f"Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList {_ps_quote(args)}"]
+    r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if not result.is_file():
+        shutil.rmtree(work, ignore_errors=True)
+        return 1223, "Cancelled: Windows did not run the ViGEmBus installer (UAC declined?).\n" + (r.stderr or "").strip()
+    text = result.read_text(encoding="utf-8", errors="replace").strip()
+    shutil.rmtree(work, ignore_errors=True)
+    rc = int(text) if text.lstrip("-").isdigit() else 1
+    after = vigembus_status()
+    lines = [
+        f"ViGEmBus installer {setup.name} exited {rc}.",
+        f"ViGEmBus now: {after['summary']}",
+    ]
+    if rc == 3010:
+        lines.append("Windows restart required to finish ViGEmBus driver setup.")
+    if before.get("needs_update") and after.get("needs_update"):
+        lines.append("Note: upstream v1.22.0 in-place upgrades can require running the ViGEmBus installer a second time.")
+    return rc, "\n".join(lines)
+
+
 def install_package(
     pkg_path: Path,
     *,
     use_pkexec: bool = True,
     overwrite_paths: list[str] | None = None,
+    silent: bool = False,
 ) -> tuple[int, str]:
     if not pkg_path.is_file():
         return 2, f"Package not found: {pkg_path}"
+    if WINDOWS:
+        return install_windows(pkg_path, silent=silent)
     elevator = shutil.which("pkexec") if use_pkexec else shutil.which("sudo")
     if not elevator:
         elevator = shutil.which("sudo") or shutil.which("pkexec")
@@ -474,6 +891,7 @@ def install_package(
 def cli_check(as_json: bool = False) -> int:
     cur = installed_version()
     svc = service_status()
+    vg = vigembus_status() if WINDOWS else None
     raw = fetch_releases()
     ch = parse_channels(raw)
     cached = [p.name for p in list_cached_packages()]
@@ -501,10 +919,15 @@ def cli_check(as_json: bool = False) -> int:
         ],
         "cached_rollbacks": cached,
     }
+    if vg is not None:
+        payload["vigembus"] = vg
     if as_json:
         print(json.dumps(payload, indent=2))
         return 0
     print(f"Vibepollo Installed : {cur or 'NOT INSTALLED'} ({svc})")
+    if vg is not None:
+        hint = "  (install: vibepollo-updater --install-vigembus)" if (not vg["installed"] or vg["needs_update"]) else ""
+        print(f"ViGEmBus Driver     : {vg['summary']}{hint}")
     print(f"Upstream Repo       : https://github.com/{REPO}")
     for key in CHANNELS:
         v = ch.get(key)
@@ -521,13 +944,30 @@ def cli_check(as_json: bool = False) -> int:
     return 0
 
 
+def matches_installed_release(installed: str | None, entry: dict[str, Any]) -> bool:
+    """True when the installed version string matches a release entry (works on both Windows and Linux)."""
+    if not installed:
+        return False
+    cur_num = numeric_version(installed)
+    rel_num = numeric_version(entry.get("tag"))
+    if cur_num is not None and rel_num is not None:
+        return cur_num == rel_num
+    cur_clean = installed.strip().lower().removeprefix("v").split("-", 1)[0]
+    tag_clean = str(entry.get("tag") or "").strip().lower().removeprefix("v")
+    if cur_clean == tag_clean:
+        return True
+    asset_name = str((entry.get("asset") or {}).get("name") or "")
+    parts = asset_name.split("-")
+    return len(parts) >= 2 and cur_clean == parts[1].lower()
+
+
 def cli_list(*, include_prereleases: bool = True) -> int:
     cur = installed_version()
     rows = parse_releases(fetch_releases(), include_prereleases=include_prereleases)
     print(f"{'TAG':<44} {'KIND':<11} {'DATE':<10}  SIZE")
     for e in rows:
         kind = e["channel"] if e["prerelease"] else "stable"
-        mark = "  <- installed" if cur and cur.split("-")[0] == e["asset"]["name"].split("-")[1] else ""
+        mark = "  <- installed" if matches_installed_release(cur, e) else ""
         print(f"{e['tag']:<44} {kind:<11} {e['published_at'][:10]}  {e['asset']['size'] / (1024 * 1024):.1f} MiB{mark}")
     print(f"\n{len(rows)} releases. Install one: vibepollo-updater --install-version <TAG>")
     return 0
@@ -553,7 +993,7 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             QWidget,
         )
     except ImportError:
-        print("PySide6 is required for GUI mode (install `pyside6` via pacman). CLI mode (`--check`, `--update`) needs no GUI.", file=sys.stderr)
+        print("PySide6 is required for GUI mode (Arch: pacman -S pyside6; Windows: py -m pip install PySide6). CLI mode (`--check`, `--update`) needs no GUI.", file=sys.stderr)
         return 2
 
     app = QApplication.instance() or QApplication(["vibepollo-updater"])
@@ -595,17 +1035,33 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
                 else:
                     assert self._rel is not None
                     pkg = download_and_verify(self._rel, progress_cb=lambda p, m: self.progress.emit(p, m))
-                self.progress.emit(100, f"Running pacman -U {pkg.name} (authenticate if prompted)...")
+                self.progress.emit(100, (f"Running {pkg.name} (approve the Windows prompt)..." if WINDOWS else f"Running pacman -U {pkg.name} (authenticate if prompted)..."))
                 rc, out = install_package(pkg, use_pkexec=True, overwrite_paths=self._overwrite_paths)
                 self.finished_install.emit(rc, out, pkg)
             except Exception as exc:
                 self.finished_install.emit(1, str(exc), pkg)
 
+    class ViGEmWorker(QThread):
+        progress = Signal(int, str)
+        finished_vigem = Signal(int, str)
+
+        def __init__(self, parent=None) -> None:
+            super().__init__(parent)
+
+        def run(self) -> None:
+            try:
+                setup = download_and_verify_vigembus(progress_cb=lambda p, m: self.progress.emit(p, m))
+                self.progress.emit(100, f"Running {setup.name} (approve the Windows prompt)...")
+                rc, out = install_vigembus(setup, silent=False)
+                self.finished_vigem.emit(rc, out)
+            except Exception as exc:
+                self.finished_vigem.emit(1, str(exc))
+
     class UpdaterWindow(QMainWindow):
         def __init__(self) -> None:
             super().__init__()
             self.setWindowTitle("Vibepollo Installer & Updater — Stable · Latest")
-            self._family = linux_family()
+            self._supported = platform_supported()
             self.resize(840, 620)
             self._channels: dict[str, dict[str, Any] | None] = {}
             self._raw_releases: list[dict[str, Any]] = []
@@ -694,10 +1150,26 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             lay.addLayout(act)
 
             self.icon_chk = QCheckBox("Vibepollo icon on the Desktop")
+            self.icon_chk.setVisible(not WINDOWS)   # Windows: upstream's installer makes its own shortcuts
             self.icon_chk.setChecked(vibepollo_desktop_icon())
             self.icon_chk.setToolTip(str(VIBEPOLLO_DESKTOP_ICON))
             self.icon_chk.toggled.connect(self._toggle_desktop_icon)
             lay.addWidget(self.icon_chk)
+
+            # Windows optional gamepad dependency: ViGEmBus v1.22.0 (final release)
+            self.vigem_box = QFrame()
+            self.vigem_box.setObjectName("ChannelCard")
+            self.vigem_box.setVisible(WINDOWS)
+            vgl = QHBoxLayout(self.vigem_box)
+            vgl.setContentsMargins(10, 6, 10, 6)
+            self.vigem_lbl = QLabel("")
+            self.vigem_lbl.setStyleSheet("color: #d6e4f0; font-weight: 600;")
+            self.vigem_btn = QPushButton(f"Install ViGEmBus v{VIGEMBUS_VERSION}")
+            self.vigem_btn.setToolTip(f"Download & verify official ViGEmBus {VIGEMBUS_TAG} ({VIGEMBUS_RELEASE_URL})")
+            self.vigem_btn.clicked.connect(self.start_vigembus)
+            vgl.addWidget(self.vigem_lbl, 1)
+            vgl.addWidget(self.vigem_btn)
+            lay.addWidget(self.vigem_box)
 
             self.status_lbl = QLabel("Ready. No changes are made until you click Install.")
             self.status_lbl.setStyleSheet("color: #e8b84b;")
@@ -724,7 +1196,7 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             cur = installed_version()
             svc = service_status()
             self.cur_lbl.setText(f"Installed: vibepollo {cur or 'NOT INSTALLED'}   |   Service: {svc}")
-            if self._family != "arch":
+            if not self._supported:
                 self.install_btn.setText("No upstream package for this distro")
                 self.install_btn.setEnabled(False)
             elif cur:
@@ -736,6 +1208,16 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             for p in cached:
                 self.rollback_combo.addItem(p.name, str(p))
             self.rollback_btn.setEnabled(bool(cached))
+            if WINDOWS:
+                vg = vigembus_status()
+                self.vigem_lbl.setText(f"ViGEmBus (gamepad driver): {vg['summary']}")
+                if not vg["installed"]:
+                    self.vigem_btn.setText(f"Install ViGEmBus v{VIGEMBUS_VERSION}")
+                elif vg["needs_update"]:
+                    self.vigem_btn.setText(f"Update ViGEmBus to v{VIGEMBUS_VERSION}")
+                else:
+                    self.vigem_btn.setText(f"Reinstall ViGEmBus v{VIGEMBUS_VERSION}")
+                self.vigem_btn.setEnabled(True)
 
         def selected_channel(self) -> str:
             for k, rb in self.radios.items():
@@ -842,7 +1324,7 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
                     "Try another selection. If upstream changed its release format, please open an issue."
                 )
                 return
-            self.install_btn.setEnabled(self._family == "arch")
+            self.install_btn.setEnabled(self._supported)
             a = rel["asset"]
             kind = "PRE-RELEASE" if rel["prerelease"] else "STABLE"
             caution = (
@@ -862,7 +1344,7 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             )
 
         def start_install(self) -> None:
-            if self._family != "arch":
+            if not self._supported:
                 self.status_lbl.setText(
                     "Upstream ships an Arch pacman package only. No .deb, .rpm, AppImage, or Flatpak in this beta."
                 )
@@ -904,6 +1386,53 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
                 return
             self._run_worker(InstallWorker(rel=None, local_pkg=pkg, parent=self))
 
+        def start_vigembus(self) -> None:
+            if not WINDOWS or self._busy():
+                return
+            vg = vigembus_status()
+            extra = (
+                "\n\nNote: ViGEmBus v1.22.0's release notes mention that in-place upgrades "
+                "over older versions may require running the setup twice."
+                if vg.get("needs_update") else ""
+            )
+            ans = QMessageBox.question(
+                self,
+                f"Install ViGEmBus v{VIGEMBUS_VERSION}",
+                f"Download, verify SHA-256, and run the official ViGEmBus {VIGEMBUS_TAG} installer?\n\n"
+                f"  {VIGEMBUS_ASSET_NAME}\n  {VIGEMBUS_RELEASE_URL}{extra}\n\nProceed?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if ans != QMessageBox.Yes:
+                return
+            self.install_btn.setEnabled(False)
+            self.rollback_btn.setEnabled(False)
+            self.refresh_btn.setEnabled(False)
+            self.vigem_btn.setEnabled(False)
+            self.pbar.setValue(0)
+            w = ViGEmWorker(parent=self)
+            self._adopt(w)
+            w.progress.connect(self._on_progress, Qt.ConnectionType.QueuedConnection)
+            w.finished_vigem.connect(self._on_vigem_done, Qt.ConnectionType.QueuedConnection)
+            w.start()
+
+        def _on_vigem_done(self, rc: int, out: str) -> None:
+            worker = self.sender()
+            if isinstance(worker, QThread):
+                worker.wait(60_000)
+            self.refresh_btn.setEnabled(True)
+            self._refresh_local_state()
+            self._update_preview()
+            self.notes.appendPlainText(f"\n--- ViGEmBus installer output (exit {rc}) ---\n{out}")
+            if rc == 0:
+                self.pbar.setValue(100)
+                self.status_lbl.setText(f"ViGEmBus v{VIGEMBUS_VERSION} installed.")
+            elif rc == 3010:
+                self.pbar.setValue(100)
+                self.status_lbl.setText(f"ViGEmBus v{VIGEMBUS_VERSION} installed (restart Windows to finish).")
+            else:
+                self.status_lbl.setText(f"ViGEmBus installer exited with code {rc} (see log above).")
+
         def _on_progress(self, pct: int, message: str) -> None:
             self.pbar.setValue(pct)
             self.status_lbl.setText(message)
@@ -915,6 +1444,7 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             self.install_btn.setEnabled(False)
             self.rollback_btn.setEnabled(False)
             self.refresh_btn.setEnabled(False)
+            self.vigem_btn.setEnabled(False)
             self.pbar.setValue(0)
             self._adopt(w)
             w.progress.connect(self._on_progress, Qt.ConnectionType.QueuedConnection)
@@ -928,27 +1458,31 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             self.refresh_btn.setEnabled(True)
             self._refresh_local_state()
             self._update_preview()
-            self.notes.appendPlainText(f"\n--- pacman Output (exit {rc}) ---\n{out}")
-            if rc == 0:
+            self.notes.appendPlainText(f"\n--- {'installer' if WINDOWS else 'pacman'} output (exit {rc}) ---\n{out}")
+            if rc == 0 or (WINDOWS and rc == 3010):
                 self.pbar.setValue(100)
-                self.status_lbl.setText(f"Installed vibepollo {installed_version()} successfully.")
+                if WINDOWS and rc == 3010:
+                    self.status_lbl.setText(f"Installed vibepollo {installed_version() or ''} (restart Windows to finish driver setup).")
+                else:
+                    self.status_lbl.setText(f"Installed vibepollo {installed_version()} successfully.")
                 return
-            safe_conflicts = filter_unowned_conflicts(parse_safe_vibepollo_conflicts(out))
-            if safe_conflicts and isinstance(pkg, Path) and pkg.is_file():
-                listing = "\n".join(f"  - {p}" for p in safe_conflicts)
-                ans = QMessageBox.question(
-                    self,
-                    "Resolve Unowned Vibepollo File Conflict?",
-                    "pacman reported untracked Vibepollo/Vibeshine file(s) not owned by any package:\n\n"
-                    f"{listing}\n\n"
-                    "This commonly happens when switching between Vibepollo Stable and Nightly.\n"
-                    "Retry with scoped --overwrite for ONLY these exact unowned files?",
-                )
-                if ans == QMessageBox.Yes:
-                    self._run_worker(
-                        InstallWorker(rel=None, local_pkg=pkg, overwrite_paths=safe_conflicts, parent=self)
+            if not WINDOWS:
+                safe_conflicts = filter_unowned_conflicts(parse_safe_vibepollo_conflicts(out))
+                if safe_conflicts and isinstance(pkg, Path) and pkg.is_file():
+                    listing = "\n".join(f"  - {p}" for p in safe_conflicts)
+                    ans = QMessageBox.question(
+                        self,
+                        "Resolve Unowned Vibepollo File Conflict?",
+                        "pacman reported untracked Vibepollo/Vibeshine file(s) not owned by any package:\n\n"
+                        f"{listing}\n\n"
+                        "This commonly happens when switching between Vibepollo Stable and Nightly.\n"
+                        "Retry with scoped --overwrite for ONLY these exact unowned files?",
                     )
-                    return
+                    if ans == QMessageBox.Yes:
+                        self._run_worker(
+                            InstallWorker(rel=None, local_pkg=pkg, overwrite_paths=safe_conflicts, parent=self)
+                        )
+                        return
             self.status_lbl.setText(f"Install exited with code {rc} (see log above).")
 
     win = UpdaterWindow()
@@ -988,11 +1522,13 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--json", action="store_true", help="show release check output as JSON")
     mode.add_argument("--update", choices=CLI_CHANNELS, help="install stable or latest (prerelease/nightly are legacy aliases)")
     mode.add_argument("--rollback", action="store_true", help="reinstall newest cached fallback package")
+    mode.add_argument("--install-vigembus", action="store_true", help="Windows only: download, verify SHA-256, and install ViGEmBus v1.22.0")
     mode.add_argument("--smoke-offscreen", action="store_true", help="headless Qt GUI verification")
     mode.add_argument("--desktop-icon", choices=("on", "off", "status"), help="optional Vibepollo launcher on the Desktop")
     parser.add_argument("--stable-only", action="store_true", help="with --list, hide pre-releases")
     parser.add_argument("--allow-downgrade", action="store_true", help="explicitly permit an older numeric version via --update/--install-version")
-    parser.add_argument("--overwrite-unowned", action="store_true", help="in CLI --update/--rollback, retry scoped --overwrite for unowned vibepollo/vibeshine file conflicts")
+    parser.add_argument("--overwrite-unowned", action="store_true", help="in CLI --update/--rollback on Linux, retry scoped --overwrite for unowned vibepollo/vibeshine file conflicts")
+    parser.add_argument("--silent", action="store_true", help="on Windows CLI --update/--install-version/--rollback, pass /qn /norestart to VibepolloSetup.exe")
     ns = parser.parse_args(argv)
 
     if ns.check or ns.json:
@@ -1008,7 +1544,7 @@ def main(argv: list[str] | None = None) -> int:
     if ns.list:
         return cli_list(include_prereleases=not ns.stable_only)
     if ns.update or ns.install_version:
-        if linux_family() != "arch":
+        if not platform_supported():
             print(
                 "This distro has no upstream Vibepollo package. Linux beta ships an Arch pacman package only.",
                 file=sys.stderr,
@@ -1036,8 +1572,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
         pkg = download_and_verify(rel, progress_cb=lambda p, m: print(f"[{p:3d}%] {m}"))
-        rc, out = install_package(pkg, use_pkexec=False)
-        if rc != 0:
+        rc, out = install_package(pkg, use_pkexec=False, silent=ns.silent)
+        if rc != 0 and not WINDOWS:
             safe = filter_unowned_conflicts(parse_safe_vibepollo_conflicts(out))
             if safe and ns.overwrite_unowned:
                 print(f"Retrying with scoped --overwrite for unowned Vibepollo files: {', '.join(safe)}")
@@ -1051,15 +1587,23 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return rc
         print(out)
-        return rc
+        return 0 if (WINDOWS and rc == 3010) else rc
     if ns.rollback:
         cached = list_cached_packages()
         if not cached:
             print(f"No cached Vibepollo packages found in {CACHE_DIR}.", file=sys.stderr)
             return 2
-        rc, out = install_package(cached[0], use_pkexec=False)
+        rc, out = install_package(cached[0], use_pkexec=False, silent=ns.silent)
         print(out)
-        return rc
+        return 0 if (WINDOWS and rc == 3010) else rc
+    if ns.install_vigembus:
+        if not WINDOWS:
+            print("ViGEmBus is a Windows-only gamepad driver.", file=sys.stderr)
+            return 2
+        setup = download_and_verify_vigembus(progress_cb=lambda p, m: print(f"[{p:3d}%] {m}"))
+        rc, out = install_vigembus(setup, silent=ns.silent)
+        print(out)
+        return 0 if rc == 3010 else rc
     return launch_gui(smoke_offscreen=ns.smoke_offscreen)
 
 

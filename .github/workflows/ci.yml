@@ -8,15 +8,26 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Syntax check
-        run: python3 -m py_compile vibepollo-updater tests/test_vibepollo_updater.py tests/upstream_contract.py
-      - name: Shell check
+        run: python -m py_compile vibepollo-updater tests/test_vibepollo_updater.py tests/upstream_contract.py
+      - name: Shell check (Linux)
+        if: runner.os == 'Linux'
         run: bash -n install.sh
+      - name: PowerShell syntax check (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $errs = $null
+          [System.Management.Automation.Language.Parser]::ParseFile("$PWD/install.ps1", [ref]$null, [ref]$errs) | Out-Null
+          if ($errs) { $errs | ForEach-Object { Write-Error $_.Message }; exit 1 }
       - name: Unit tests
-        run: python3 -m unittest discover -s tests -v
+        run: python -m unittest discover -s tests -v
