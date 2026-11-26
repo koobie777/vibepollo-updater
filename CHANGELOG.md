@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to **vibepollo-updater** are documented in this file.
+All notable changes to **vibepollo-updater** are documented in this file. Each version is also a [GitHub Release](https://github.com/koobie777/vibepollo-updater/releases). Update this file in the same commit as the version bump.
 
 ## [1.3.1] — 2026-11-24
 ### Changed

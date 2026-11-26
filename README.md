@@ -12,6 +12,21 @@ So I made one. This is an **unofficial, community-made installer and updater** f
 
 > **Quick heads-up:** This is not part of VibePollo, and it does not modify or replace its source code. It downloads the official installers published by the upstream project. Upstream can change how those packages work, so compatibility isn't guaranteed.
 
+## Releases
+
+This updater's own versions are [GitHub Releases](https://github.com/koobie777/vibepollo-updater/releases). The notes for each version are in [CHANGELOG.md](CHANGELOG.md). A version is not done until both are updated.
+
+| Version | Date | What changed |
+| --- | --- | --- |
+| [1.3.1](https://github.com/koobie777/vibepollo-updater/releases/tag/v1.3.1) | 2026-11-24 | Darker window, no stray consoles on Windows, this changelog |
+| [1.3.0](https://github.com/koobie777/vibepollo-updater/releases/tag/v1.3.0) | 2026-11-24 | Windows installer, config backup, ViGEmBus v1.22.0 |
+| [1.2.0](https://github.com/koobie777/vibepollo-updater/releases/tag/v1.2.0) | 2026-11-23 | Numeric Stable/Latest channels and downgrade guard |
+| [1.1.1](https://github.com/koobie777/vibepollo-updater/releases/tag/v1.1.1) | 2026-11-23 | Real launcher icon, optional Desktop icon |
+| [1.1.0](https://github.com/koobie777/vibepollo-updater/releases/tag/v1.1.0) | 2026-11-23 | Every recent tag, install one tag |
+| [1.0.0](https://github.com/koobie777/vibepollo-updater/releases/tag/v1.0.0) | 2026-11-23 | Arch GUI and CLI, SHA-256 check, three-package rollback |
+
+Those tags are this project. The packages it installs still come from [Nonary/Vibepollo](https://github.com/Nonary/Vibepollo/releases).
+
 ## What it does
 
 | | |
