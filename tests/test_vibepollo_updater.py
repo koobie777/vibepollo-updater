@@ -251,6 +251,34 @@ class VibepolloUpdaterTests(unittest.TestCase):
             )
             self.assertTrue(keep_other.exists())
 
+    def test_plan_action_and_cached_name_guard(self) -> None:
+        m = _load_mod()
+        rel = m.release_entry(SAMPLE_RELEASES[0], windows=True)
+        self.assertEqual(m.plan_action(None, None), "unavailable")
+        self.assertEqual(m.plan_action(None, rel), "install")
+        self.assertEqual(m.plan_action("2.20.1", rel), "reinstall")
+        self.assertEqual(m.plan_action("2.18.0", rel), "update")
+        self.assertEqual(m.plan_action("2.21.0", rel), "downgrade")
+        with tempfile.TemporaryDirectory() as td:
+            cache = Path(td)
+            good = cache / "VibepolloSetup-2.18.9.exe"
+            good.write_bytes(b"x")
+            pkg = cache / "vibepollo-2.18.9-1-x86_64.pkg.tar.zst"
+            pkg.write_bytes(b"y")
+            self.assertEqual(m.resolve_cached_package(good.name, cache_dir=cache), good.resolve())
+            self.assertEqual(m.resolve_cached_package(pkg.name, cache_dir=cache), pkg.resolve())
+            outside = Path(td) / "outside.exe"
+            outside.write_bytes(b"z")
+            for bad in (
+                "../" + good.name,
+                str(good),
+                "ViGEmBus_1.22.0_x64_x86_arm64.exe",
+                "notes.txt",
+                "",
+            ):
+                with self.assertRaises(ValueError):
+                    m.resolve_cached_package(bad, cache_dir=cache)
+
     def test_windows_asset_naming_and_matches_installed(self) -> None:
         m = _load_mod()
         win_rel = m.release_entry(SAMPLE_RELEASES[0], windows=True)

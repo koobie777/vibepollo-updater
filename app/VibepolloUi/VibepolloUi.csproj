@@ -1,0 +1,19 @@
+<Project Sdk="Uno.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net10.0-windows10.0.26100;net10.0-desktop</TargetFrameworks>
+    <OutputType>WinExe</OutputType>
+    <OutputType Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) != 'windows'">Exe</OutputType>
+    <AssemblyName>vibepollo-ui</AssemblyName>
+    <RootNamespace>VibepolloUi</RootNamespace>
+    <UnoSingleProject>true</UnoSingleProject>
+    <UnoFeatures>Skia;</UnoFeatures>
+    <ApplicationTitle>Vibepollo Updater</ApplicationTitle>
+    <ApplicationId>com.koobie777.vibepolloui</ApplicationId>
+    <ApplicationDisplayVersion>1.4.0</ApplicationDisplayVersion>
+    <ApplicationVersion>4</ApplicationVersion>
+    <ApplicationPublisher>koobie777</ApplicationPublisher>
+    <Description>Unofficial Vibepollo installer. WinUI 3 on Windows, Uno Skia on Linux. The Python CLI still installs.</Description>
+    <DefineConstants Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'windows'">$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+    <WindowsPackageType Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'windows'">None</WindowsPackageType>
+  </PropertyGroup>
+</Project>

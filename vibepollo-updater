@@ -32,7 +32,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-__version__ = "1.3.1"
+__version__ = "1.4.0"
 
 WINDOWS = sys.platform == "win32"
 _NO_WINDOW_KW: dict[str, Any] = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if WINDOWS else {}
@@ -929,30 +929,50 @@ def cli_check(as_json: bool = False) -> int:
     raw = fetch_releases()
     ch = parse_channels(raw)
     cached = [p.name for p in list_cached_packages()]
+    def _view(v: dict[str, Any] | None) -> dict[str, Any] | None:
+        if v is None:
+            return None
+        sha = str(v["asset"]["sha256"] or "")
+        return {
+            "tag": v["tag"],
+            "name": v["name"],
+            "published_at": v["published_at"],
+            "html_url": v["html_url"],
+            "notes": v["notes"],
+            "asset": v["asset"]["name"],
+            "size_mb": round(v["asset"]["size"] / (1024 * 1024), 1),
+            "sha256": sha,
+            "sha256_present": bool(sha),
+            "prerelease": v["prerelease"],
+            "older_than_installed": release_is_downgrade(cur, v),
+            "action": plan_action(cur, v),
+        }
+
     payload = {
+        "schema": "vibepollo.updater.check.v2",
+        "updater": __version__,
         "installed": cur,
         "service": svc,
+        "platform_supported": platform_supported(),
         "upstream": f"https://github.com/{REPO}",
-        "channels": {
-            k: (None if v is None else {
-                "tag": v["tag"],
-                "name": v["name"],
-                "published_at": v["published_at"],
-                "asset": v["asset"]["name"],
-                "size_mb": round(v["asset"]["size"] / (1024 * 1024), 1),
-                "sha256": v["asset"]["sha256"],
-                "prerelease": v["prerelease"],
-                "older_than_installed": release_is_downgrade(cur, v),
-            })
-            for k, v in ch.items()
-        },
+        "channels": {k: _view(v) for k, v in ch.items()},
         "releases": [
-            {"tag": e["tag"], "prerelease": e["prerelease"], "channel": e["channel"],
-             "published_at": e["published_at"], "asset": e["asset"]["name"], "sha256": e["asset"]["sha256"]}
+            {"tag": e["tag"], "name": e["name"], "prerelease": e["prerelease"], "channel": e["channel"],
+             "published_at": e["published_at"], "asset": e["asset"]["name"],
+             "size_mb": round(e["asset"]["size"] / (1024 * 1024), 1),
+             "sha256": e["asset"]["sha256"], "sha256_present": bool(e["asset"]["sha256"]),
+             "notes": e["notes"], "html_url": e["html_url"],
+             "older_than_installed": release_is_downgrade(cur, e),
+             "action": plan_action(cur, e)}
             for e in parse_releases(raw)
         ],
         "cached_rollbacks": cached,
+        "config_backups": list_config_backups(),
     }
+    if WINDOWS:
+        entries = windows_installs()
+        ver, stacked = summarize_windows_installs(entries)
+        payload["windows_installs"] = {"count": len(entries), "stacked": stacked, "version": ver}
     if vg is not None:
         payload["vigembus"] = vg
     if as_json:
@@ -976,6 +996,53 @@ def cli_check(as_json: bool = False) -> int:
     if cached:
         print(f"Cached for rollback : {', '.join(cached)}")
     return 0
+
+
+def plan_action(installed: str | None, release: dict[str, Any] | None) -> str:
+    """What an install of this release would do. Nothing is installed here."""
+    if not release:
+        return "unavailable"
+    if not installed:
+        return "install"
+    if matches_installed_release(installed, release):
+        return "reinstall"
+    if release_is_downgrade(installed, release):
+        return "downgrade"
+    return "update"
+
+
+def list_config_backups(limit: int = 5) -> list[dict[str, str]]:
+    """Newest config backups by folder name only. No paths."""
+    root = CONFIG_BACKUP_DIR
+    if not root.is_dir():
+        return []
+    rows: list[tuple[float, str, str]] = []
+    for path in root.iterdir():
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        kind = "dir" if path.is_dir() else "file"
+        rows.append((st.st_mtime, path.name, kind))
+    rows.sort(reverse=True)
+    return [
+        {"name": name, "kind": kind, "modified": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(mtime))}
+        for mtime, name, kind in rows[:limit]
+    ]
+
+
+def resolve_cached_package(name: str, *, cache_dir: Path = CACHE_DIR) -> Path:
+    """A cache file name, never a path. Only a Vibepollo package already in the cache."""
+    raw = (name or "").strip()
+    if not raw or raw != Path(raw).name or raw in {".", ".."}:
+        raise ValueError("rollback name must be a file in the cache, not a path")
+    if not (WIN_CACHED_RE.match(raw) or PKG_RE.match(raw)):
+        raise ValueError(f"not a cached Vibepollo package: {raw}")
+    root = cache_dir.resolve()
+    path = (root / raw).resolve()
+    if path.parent != root or not path.is_file():
+        raise ValueError(f"not in the cache: {raw}")
+    return path
 
 
 def matches_installed_release(installed: str | None, entry: dict[str, Any]) -> bool:
@@ -1556,6 +1623,8 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--json", action="store_true", help="show release check output as JSON")
     mode.add_argument("--update", choices=CLI_CHANNELS, help="install stable or latest (prerelease/nightly are legacy aliases)")
     mode.add_argument("--rollback", action="store_true", help="reinstall newest cached fallback package")
+    mode.add_argument("--rollback-cached", metavar="NAME", help="reinstall one cached package by file name (not a path)")
+    mode.add_argument("--self-check", action="store_true", help="offline check: version and platform, no network and no install")
     mode.add_argument("--install-vigembus", action="store_true", help="Windows only: download, verify SHA-256, and install ViGEmBus v1.22.0")
     mode.add_argument("--smoke-offscreen", action="store_true", help="headless Qt GUI verification")
     mode.add_argument("--desktop-icon", choices=("on", "off", "status"), help="optional Vibepollo launcher on the Desktop")
@@ -1565,6 +1634,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--silent", action="store_true", help="on Windows CLI --update/--install-version/--rollback, pass /qn /norestart to VibepolloSetup.exe")
     ns = parser.parse_args(argv)
 
+    if ns.self_check:
+        print(json.dumps({
+            "ok": True,
+            "schema": "vibepollo.updater.self.v1",
+            "version": __version__,
+            "platform": "windows" if WINDOWS else linux_family(),
+            "supported": platform_supported(),
+        }))
+        return 0
     if ns.check or ns.json:
         return cli_check(as_json=ns.json)
     if ns.desktop_icon:
@@ -1620,6 +1698,15 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 return rc
+        print(out)
+        return 0 if (WINDOWS and rc == 3010) else rc
+    if ns.rollback_cached:
+        try:
+            chosen = resolve_cached_package(ns.rollback_cached)
+        except ValueError as exc:
+            print(exc, file=sys.stderr)
+            return 2
+        rc, out = install_package(chosen, use_pkexec=False, silent=ns.silent)
         print(out)
         return 0 if (WINDOWS and rc == 3010) else rc
     if ns.rollback:

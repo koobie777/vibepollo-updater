@@ -1,0 +1,4 @@
+{
+  "msbuild-sdks": { "Uno.Sdk": "7.0.22" },
+  "sdk": { "allowPrerelease": false }
+}

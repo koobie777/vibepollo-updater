@@ -18,6 +18,7 @@ This updater's own versions are [GitHub Releases](https://github.com/koobie777/v
 
 | Version | Date | What changed |
 | --- | --- | --- |
+| 1.4.0 | 2026-11-26 | .NET 10 window (WinUI 3 on Windows, Uno Skia on Linux). Plan before install, cached rollback by name. Not tagged until it is tested. |
 | [1.3.1](https://github.com/koobie777/vibepollo-updater/releases/tag/v1.3.1) | 2026-11-24 | Darker window, no stray consoles on Windows, this changelog |
 | [1.3.0](https://github.com/koobie777/vibepollo-updater/releases/tag/v1.3.0) | 2026-11-24 | Windows installer, config backup, ViGEmBus v1.22.0 |
 | [1.2.0](https://github.com/koobie777/vibepollo-updater/releases/tag/v1.2.0) | 2026-11-23 | Numeric Stable/Latest channels and downgrade guard |

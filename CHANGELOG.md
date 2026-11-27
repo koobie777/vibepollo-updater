@@ -2,6 +2,14 @@
 
 All notable changes to **vibepollo-updater** are documented in this file. Each version is also a [GitHub Release](https://github.com/koobie777/vibepollo-updater/releases). Update this file in the same commit as the version bump.
 
+## [1.4.0] — 2026-11-26
+### Added
+- **WinUI 3 + Uno Skia window** (`app/VibepolloUi`) for Windows and Linux. The Python CLI still does every download, SHA-256 check, and install.
+- Check JSON is `vibepollo.updater.check.v2`: each release has an action (`install`, `update`, `reinstall`, `downgrade`, `unavailable`), whether the SHA-256 is present, notes, and the newest config-backup names.
+- `--rollback-cached NAME` reinstalls one file already in the cache. A path is refused.
+- `--self-check` is offline. It prints the updater version and platform and installs nothing.
+- The window shows Stable and Latest and the plan (installed version to the selected release). It selects an update when one exists, otherwise the installed release, otherwise Stable. A downgrade stays a separate confirmed action. It also shows a stacked-install warning, silent Windows install, and a choice of cached rollback. A newer copy of the Python engine wins over an older one.
+
 ## [1.3.1] — 2026-11-24
 ### Changed
 - **Refreshed Dark Outer-Space GUI:** Upgraded PySide6 stylesheet with deeper contrast cards, cyan gradient progress bar, crisp hover/focus states, custom slim scrollbars, and native Windows (`Segoe UI` / `Cascadia Mono`) + Linux (`Inter` / `JetBrains Mono`) font stacks.
