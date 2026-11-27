@@ -18,7 +18,7 @@ This updater's own versions are [GitHub Releases](https://github.com/koobie777/v
 
 | Version | Date | What changed |
 | --- | --- | --- |
-| 1.4.0 | 2026-11-26 | .NET 10 window (WinUI 3 on Windows, Uno Skia on Linux). Plan before install, cached rollback by name. Not tagged until it is tested. |
+| [1.4.0](https://github.com/koobie777/vibepollo-updater/releases/tag/v1.4.0) | 2026-11-26 | .NET 10 window (WinUI 3 on Windows, Uno Skia on Linux). Plan before install, cached rollback by name. Windows zip and Linux tar are on the release. |
 | [1.3.1](https://github.com/koobie777/vibepollo-updater/releases/tag/v1.3.1) | 2026-11-24 | Darker window, no stray consoles on Windows, this changelog |
 | [1.3.0](https://github.com/koobie777/vibepollo-updater/releases/tag/v1.3.0) | 2026-11-24 | Windows installer, config backup, ViGEmBus v1.22.0 |
 | [1.2.0](https://github.com/koobie777/vibepollo-updater/releases/tag/v1.2.0) | 2026-11-23 | Numeric Stable/Latest channels and downgrade guard |
@@ -39,7 +39,7 @@ Those tags are this project. The packages it installs still come from [Nonary/Vi
 | **Windows config safety** | Backs up `%ProgramFiles%\Apollo\config` before running the Windows installer, warns on stacked duplicate installs, and shows `ApolloService` status. |
 | **Windows ViGEmBus helper** | Detects [ViGEmBus v1.22.0](https://github.com/nefarius/ViGEmBus/releases/tag/v1.22.0) (final release, SHA-256 pinned) and installs or updates it on demand for Xbox 360 / DS4 / auto gamepad emulation. |
 | **See what you're getting** | Read release notes, package details, and the SHA-256 digest before installation. |
-| **Use the GUI or terminal** | PySide6 desktop app, plus a Python-standard-library CLI. |
+| **Use the GUI or terminal** | WinUI 3 window on Windows (in the release zip). Python CLI on Windows and Linux. Running the script with no flags still opens the older PySide6 window when PySide6 is installed. |
 
 Nothing installs in the background. You decide when to check for updates and when to install one.
 
@@ -47,24 +47,25 @@ Nothing installs in the background. You decide when to check for updates and whe
 
 ### Windows
 
-You'll need **Windows 10/11 (x64)** and **Python 3.10+**. For the desktop window, install **PySide6** (`py -m pip install PySide6`). CLI mode needs only Python's standard library.
+Tender: download the Windows zip from [v1.4.0](https://github.com/koobie777/vibepollo-updater/releases/tag/v1.4.0). You need **Windows 10/11 (x64)** and **Python 3.10+**. The zip includes the window. The Python CLI still does the download, the SHA-256 check, and the install.
+
+![Vibepollo Updater 1.4.0](docs/screenshot-1.4.0.png)
 
 ```powershell
-git clone https://github.com/koobie777/vibepollo-updater.git
-cd vibepollo-updater
+# Unzip vibepollo-updater-1.4.0-windows.zip, then:
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 Open **Vibepollo Updater** from the Start menu or Desktop, or run `vibepollo-updater --check` in a new terminal.
 
 - Skip the Desktop shortcut: `.\install.ps1 -NoDesktop`
-- Remove **this updater** (not VibePollo, cached installers, or config backups): `.\install.ps1 -Uninstall`
+- Remove **this updater** (not VibePollo, the cached installers, or the config backups): `.\install.ps1 -Uninstall`
 
 Cached Windows installers live in `%LOCALAPPDATA%\vibepollo-updater\cache\` (tagged by release version so rollback stays clear), and pre-install config backups live in `%LOCALAPPDATA%\vibepollo-updater\config-backups\`.
 
 ### Arch Linux
 
-You'll need an **x86_64 Arch-based Linux installation**, Python 3.10+, and `pacman`. For the GUI, you'll also need **PySide6**; package installation requires `pkexec` or `sudo`.
+Mainstay: download the Linux tar from the same release, or clone the repo. You need an **x86_64 Arch-based Linux installation**, Python 3.10+, and `pacman`. Package installation uses `pkexec` or `sudo`. The 1.4.0 Linux asset installs the CLI. A `ui/vibepollo-ui` binary next to `install.sh` is installed as the window when you have built one. PySide6 is only for the older Python window.
 
 Built around Arch Linux and EndeavourOS. Other Arch-based distributions (including CachyOS and Manjaro) may work, but haven't all been tested. SteamOS has additional system-write restrictions, so treat it as **unverified** rather than plug-and-play support.
 

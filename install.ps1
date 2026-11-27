@@ -4,8 +4,9 @@
 .DESCRIPTION
     Copies vibepollo-updater into %LOCALAPPDATA%\vibepollo-updater\bin, creates a vibepollo-updater.cmd
     CLI launcher (added to your user PATH), and creates Start Menu and Desktop shortcuts.
-    Use -NoDesktop to skip the Desktop shortcut, or -Uninstall to remove the updater (cached
-    packages and config backups are kept).
+    Use -NoDesktop to skip the Desktop shortcut, or -Uninstall to remove the updater.
+    A ui\vibepollo-ui.exe next to this script (the GitHub release zip) is installed as the window.
+    Cached packages and config backups are kept.
 #>
 [CmdletBinding()]
 param(
@@ -52,8 +53,16 @@ if ($Uninstall) {
     if ((Test-Path -LiteralPath $StartMenuDir) -and -not (Get-ChildItem -LiteralPath $StartMenuDir -Force)) {
         Remove-Item -LiteralPath $StartMenuDir -Force
     }
+    if (Test-Path -LiteralPath $AppRoot) {
+        Get-ChildItem -LiteralPath $AppRoot -Force -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -eq 'ui' -or $_.Name -like 'ui.bak-*' } |
+            ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force }
+    }
+    if ((Test-Path -LiteralPath $BinDir) -and -not (Get-ChildItem -LiteralPath $BinDir -Force -ErrorAction SilentlyContinue)) {
+        Remove-Item -LiteralPath $BinDir -Force
+    }
     Remove-FromUserPath $BinDir
-    Write-Host "Removed vibepollo-updater launchers (cached installers and config backups in $AppRoot kept)."
+    Write-Host "Removed vibepollo-updater (cached installers and config backups in $AppRoot kept)."
     exit 0
 }
 
@@ -87,6 +96,27 @@ Set-Content -LiteralPath $TargetCmd -Value $cmdBody -Encoding ASCII -NoNewline
 
 Add-ToUserPath $BinDir
 
+# The release zip ships the WinUI window beside this script. A repo checkout can also
+# publish it to app\dist\win-x64. Without either, shortcuts open the Python window.
+$UiExe = $null
+foreach ($cand in @(
+    (Join-Path $ScriptDir 'ui\vibepollo-ui.exe'),
+    (Join-Path $ScriptDir 'app\dist\win-x64\vibepollo-ui.exe')
+)) {
+    if (Test-Path -LiteralPath $cand -PathType Leaf) { $UiExe = $cand; break }
+}
+$LaunchTarget = $PyGui
+$LaunchArgs = "-I `"$TargetPy`""
+$LaunchDir = $BinDir
+if ($UiExe) {
+    $UiDest = Join-Path $AppRoot 'ui'
+    New-Item -ItemType Directory -Force -Path $UiDest | Out-Null
+    Copy-Item -Path (Join-Path (Split-Path -Parent $UiExe) '*') -Destination $UiDest -Recurse -Force
+    $LaunchTarget = Join-Path $UiDest 'vibepollo-ui.exe'
+    $LaunchArgs = ''
+    $LaunchDir = $UiDest
+}
+
 # Prefer Vibepollo's own icon when installed; fall back to a standard Windows shell icon.
 $IconLoc = "$env:SystemRoot\System32\shell32.dll,46"
 foreach ($iconCand in @(
@@ -106,9 +136,9 @@ New-Item -ItemType Directory -Force -Path $StartMenuDir | Out-Null
 
 function New-UpdaterShortcut([string]$Path) {
     $lnk = $Wsh.CreateShortcut($Path)
-    $lnk.TargetPath = $PyGui
-    $lnk.Arguments = "-I `"$TargetPy`""
-    $lnk.WorkingDirectory = $BinDir
+    $lnk.TargetPath = $LaunchTarget
+    $lnk.Arguments = $LaunchArgs
+    $lnk.WorkingDirectory = $LaunchDir
     $lnk.IconLocation = $IconLoc
     $lnk.Description = 'Install, update, or roll back Vibepollo (Stable / Latest / specific version).'
     $lnk.Save()
@@ -122,17 +152,18 @@ if (-not $NoDesktop) {
     }
 }
 
-& $PyCli -c "import PySide6" 2>$null
-$hasQt = ($LASTEXITCODE -eq 0)
-
 Write-Host "Installed vibepollo-updater to $TargetPy"
 Write-Host "CLI launcher : $TargetCmd (added $BinDir to your user PATH)"
+if ($UiExe) { Write-Host "Window       : $LaunchTarget" }
 Write-Host "Start Menu   : $StartMenuLnk"
 if (-not $NoDesktop) { Write-Host "Desktop      : $DesktopLnk" }
-if (-not $hasQt) {
-    Write-Host ""
-    Write-Host "Note: PySide6 is not installed yet. CLI mode works right away (`vibepollo-updater --check`)."
-    Write-Host "For the desktop window, run:  `"$PyCli`" -m pip install PySide6"
-} else {
-    Write-Host "Run 'vibepollo-updater --check' (in a new terminal) or open 'Vibepollo Updater' from Start / Desktop."
+if (-not $UiExe) {
+    & $PyCli -c "import PySide6" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ""
+        Write-Host "Note: this copy has no WinUI window beside it, and PySide6 is not installed."
+        Write-Host "CLI mode works right away (`vibepollo-updater --check`)."
+        Write-Host "For the older Python window: `"$PyCli`" -m pip install PySide6"
+    }
 }
+Write-Host "Run 'vibepollo-updater --check' (in a new terminal) or open 'Vibepollo Updater' from Start / Desktop."

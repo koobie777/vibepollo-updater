@@ -3,6 +3,7 @@ set -euo pipefail
 
 BIN_DIR="${HOME}/.local/bin"
 APP_DIR="${HOME}/.local/share/applications"
+UI_DEST="${HOME}/.local/share/vibepollo-updater/ui"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DESKTOP=1; VIBE_ICON=0
@@ -17,19 +18,28 @@ if [ "${1:-}" = "--uninstall" ]; then
   rm -f "${BIN_DIR}/vibepollo-updater" \
         "${APP_DIR}/vibepollo-updater.desktop" \
         "${HOME}/Desktop/vibepollo-updater.desktop"
-  echo "Removed vibepollo-updater launchers (cached packages in ~/.cache/vibepollo-updater kept)."
+  rm -rf "${UI_DEST}"
+  echo "Removed vibepollo-updater (cached packages in ~/.cache/vibepollo-updater kept)."
   exit 0
 fi
 
 mkdir -p "${BIN_DIR}" "${APP_DIR}"
 install -m 755 "${SCRIPT_DIR}/vibepollo-updater" "${BIN_DIR}/vibepollo-updater"
 
+LAUNCH="${BIN_DIR}/vibepollo-updater"
+if [ -x "${SCRIPT_DIR}/ui/vibepollo-ui" ]; then
+  mkdir -p "${UI_DEST}"
+  cp -a "${SCRIPT_DIR}/ui/." "${UI_DEST}/"
+  chmod 755 "${UI_DEST}/vibepollo-ui"
+  LAUNCH="${UI_DEST}/vibepollo-ui"
+fi
+
 # Vibepollo's package installs its icon as "apollo". Fall back to a stock icon when Vibepollo is not installed yet.
 ICON=system-software-update
 for f in /usr/share/icons/hicolor/scalable/apps/apollo.svg /usr/share/icons/hicolor/*/apps/apollo.png; do
   [ -e "$f" ] && { ICON=apollo; break; }
 done
-sed -e "s|@EXEC@|${BIN_DIR}/vibepollo-updater|g" -e "s|@ICON@|${ICON}|g" "${SCRIPT_DIR}/vibepollo-updater.desktop.in" > "${APP_DIR}/vibepollo-updater.desktop"
+sed -e "s|@EXEC@|${LAUNCH}|g" -e "s|@ICON@|${ICON}|g" "${SCRIPT_DIR}/vibepollo-updater.desktop.in" > "${APP_DIR}/vibepollo-updater.desktop"
 chmod 644 "${APP_DIR}/vibepollo-updater.desktop"
 
 if [ -d "${HOME}/Desktop" ] && [ "$DESKTOP" = 1 ]; then
@@ -42,4 +52,7 @@ if [ "$VIBE_ICON" = 1 ]; then
 fi
 
 echo "Installed vibepollo-updater to ${BIN_DIR}/vibepollo-updater"
+if [ "${LAUNCH}" != "${BIN_DIR}/vibepollo-updater" ]; then
+  echo "Window: ${LAUNCH}"
+fi
 echo "Run 'vibepollo-updater --check' or launch 'Vibepollo Updater' from your app menu / Desktop."

@@ -9,6 +9,7 @@ All notable changes to **vibepollo-updater** are documented in this file. Each v
 - `--rollback-cached NAME` reinstalls one file already in the cache. A path is refused.
 - `--self-check` is offline. It prints the updater version and platform and installs nothing.
 - The window shows Stable and Latest and the plan (installed version to the selected release). It selects an update when one exists, otherwise the installed release, otherwise Stable. A downgrade stays a separate confirmed action. It also shows a stacked-install warning, silent Windows install, and a choice of cached rollback. A newer copy of the Python engine wins over an older one.
+- GitHub release assets: a Windows zip (`install.ps1` plus the WinUI window), a Linux tar (`install.sh` plus the CLI), and a screenshot of the 1.4.0 window. Uninstall removes the window folder and leaves the download cache and config backups.
 
 ## [1.3.1] — 2026-11-24
 ### Changed
