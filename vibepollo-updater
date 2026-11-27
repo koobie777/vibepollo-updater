@@ -32,7 +32,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 WINDOWS = sys.platform == "win32"
 _NO_WINDOW_KW: dict[str, Any] = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if WINDOWS else {}
@@ -730,21 +730,56 @@ def vibepollo_desktop_icon(state: str | None = None, *, src: Path = VIBEPOLLO_DE
     return dst.is_file()
 
 
-# Runs elevated (one UAC prompt): copy config aside, then run upstream's own installer and wait for it.
+# Runs elevated (one UAC prompt): copy config aside (excluding locked runtime logs), then run upstream's own installer and wait for it.
+# Writes to pre-created user-owned $Result and $Log files via WriteAllText so the non-elevated caller always retains read access.
 WIN_INSTALL_PS = r"""
-param([string]$Setup, [string]$Cfg, [string]$Backup, [string]$Result, [switch]$Silent)
+param([string]$Setup, [string]$Cfg, [string]$Backup, [string]$Result, [string]$Log, [switch]$Silent)
 $ErrorActionPreference = 'Continue'
+$logLines = New-Object System.Collections.Generic.List[string]
+function Write-Out([string]$path, [string]$text) {
+    [System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))
+}
 if (Test-Path -LiteralPath $Cfg) {
-    New-Item -ItemType Directory -Force -Path $Backup | Out-Null
-    robocopy $Cfg $Backup /E /B /COPY:DAT /R:1 /W:1 /NP /NFL /NDL /NJH /NJS | Out-Null
-    if ($LASTEXITCODE -ge 8) { "backup-failed $LASTEXITCODE" | Set-Content -LiteralPath $Result; exit 1 }
-}
-if ($Silent) {
-    $p = Start-Process -FilePath $Setup -ArgumentList @('/qn', '/norestart') -Wait -PassThru
+    try {
+        New-Item -ItemType Directory -Force -Path $Backup | Out-Null
+        $rcOut = & robocopy $Cfg $Backup /E /XJ /XD logs /COPY:DAT /R:1 /W:1 /NP /NJH /NJS /NDL 2>&1
+        $rcCode = $LASTEXITCODE
+        if ($rcCode -ge 8) {
+            $logLines.Add("robocopy exited $rcCode; falling back to core config copy")
+            foreach ($pat in @('apps.json', 'sunshine.conf', '*.json', '*.bak')) {
+                Get-ChildItem -LiteralPath $Cfg -Filter $pat -File -ErrorAction SilentlyContinue | ForEach-Object {
+                    Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $Backup $_.Name) -Force -ErrorAction SilentlyContinue
+                }
+            }
+            $cred = Join-Path $Cfg 'credentials'
+            if (Test-Path -LiteralPath $cred) {
+                Copy-Item -LiteralPath $cred -Destination (Join-Path $Backup 'credentials') -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            $logLines.Add("Core config files backed up to $Backup")
+        } else {
+            $logLines.Add("Config backed up to $Backup (robocopy exit $rcCode)")
+        }
+    } catch {
+        $logLines.Add("Config backup warning: $($_.Exception.Message)")
+    }
 } else {
-    $p = Start-Process -FilePath $Setup -Wait -PassThru
+    $logLines.Add("No existing config folder to back up.")
 }
-"$($p.ExitCode)" | Set-Content -LiteralPath $Result
+try {
+    if ($Silent) {
+        $p = Start-Process -FilePath $Setup -ArgumentList @('/qn', '/norestart') -Wait -PassThru
+    } else {
+        $p = Start-Process -FilePath $Setup -Wait -PassThru
+    }
+    $exitCode = $p.ExitCode
+    $logLines.Add("Installer exited with code $exitCode")
+    if ($Log) { Write-Out $Log ($logLines -join "`n") }
+    Write-Out $Result "$exitCode"
+} catch {
+    $logLines.Add("Failed to launch installer: $($_.Exception.Message)")
+    if ($Log) { Write-Out $Log ($logLines -join "`n") }
+    Write-Out $Result "launch-failed $($_.Exception.Message)"
+}
 """
 
 
@@ -768,39 +803,95 @@ def _recent_windows_install_log(since: float) -> Path | None:
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
+def _format_install_report(
+    *,
+    package_name: str,
+    before_ver: str | None,
+    after_ver: str | None,
+    rc: int,
+    backup_note: str,
+    service_text: str,
+    extra_notes: list[str] | None = None,
+) -> str:
+    status = "success" if rc == 0 else ("success (restart required)" if rc == 3010 else f"failed (exit {rc})")
+    ver_line = f"{before_ver or 'not installed'} -> {after_ver or 'not installed'}"
+    lines = [
+        "== Install Summary ==",
+        f"  Package   : {package_name}",
+        f"  Backup    : {backup_note}",
+        f"  Installer : exit {rc} ({status})",
+        f"  Version   : {ver_line}",
+        f"  Service   : {service_text}",
+    ]
+    for note in extra_notes or []:
+        if note.strip():
+            lines.append(f"  Note      : {note.strip()}")
+    return "\n".join(lines)
+
+
 def install_windows(setup: Path, *, silent: bool = False) -> tuple[int, str]:
     """Back up config, then run VibepolloSetup.exe elevated and wait. Returns (exit code, report)."""
     started = time.time()
+    before_ver = installed_version()
     backup = CONFIG_BACKUP_DIR / time.strftime("%Y%m%d-%H%M%S")
     work = Path(tempfile.mkdtemp(prefix="vibepollo-updater-"))
-    script, result = work / "install.ps1", work / "result.txt"
+    script = work / "install.ps1"
+    result = work / "result.txt"
+    log_file = work / "install.log"
+    # Pre-create user-owned output files so the elevated process preserves our read/delete permissions.
     script.write_text(WIN_INSTALL_PS, encoding="utf-8")
+    result.write_text("", encoding="utf-8")
+    log_file.write_text("", encoding="utf-8")
     silent_flag = " -Silent" if silent else ""
     args = (f'-NoProfile -ExecutionPolicy Bypass -File "{script}" -Setup "{setup}" '
-            f'-Cfg "{WIN_INSTALL_DIR / "config"}" -Backup "{backup}" -Result "{result}"{silent_flag}')
+            f'-Cfg "{WIN_INSTALL_DIR / "config"}" -Backup "{backup}" -Result "{result}" -Log "{log_file}"{silent_flag}')
     cmd = ["powershell", "-NoProfile", "-Command",
            f"Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList {_ps_quote(args)}"]
-    r = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if not result.is_file():
+    r = subprocess.run(cmd, capture_output=True, text=True, check=False, **_NO_WINDOW_KW)
+    try:
+        text = result.read_text(encoding="utf-8", errors="replace").strip() if result.is_file() else ""
+        log_text = log_file.read_text(encoding="utf-8", errors="replace").strip() if log_file.is_file() else ""
+    except OSError as exc:
         shutil.rmtree(work, ignore_errors=True)
-        return 1223, "Cancelled: Windows did not run the installer (UAC declined?).\n" + (r.stderr or "").strip()
-    text = result.read_text(encoding="utf-8", errors="replace").strip()
+        return 1, f"Could not read elevated installer result ({exc})."
     shutil.rmtree(work, ignore_errors=True)
+    if not text:
+        err_detail = (r.stderr or r.stdout or "").strip()
+        msg = "Cancelled: Windows did not run the installer (UAC prompt declined or blocked)."
+        return 1223, f"{msg}\n{err_detail}".strip()
+    if text.startswith("launch-failed"):
+        return 1, f"Installer failed to start: {text.removeprefix('launch-failed').strip()}"
     if text.startswith("backup-failed"):
         return 1, f"Config backup failed ({text}); nothing was installed."
     rc = int(text) if text.lstrip("-").isdigit() else 1
-    saved = f"Config backed up to {backup}" if backup.is_dir() else "No existing config to back up."
-    lines = [
-        saved,
-        f"Installer {setup.name} exited {rc}. Installed now: {installed_version() or 'none'}",
-    ]
+    # Give Windows Installer uninstall keys a brief moment to settle if exit succeeded.
+    after_ver = installed_version()
+    if rc in (0, 3010) and after_ver == before_ver:
+        for _ in range(6):
+            time.sleep(0.5)
+            after_ver = installed_version()
+            if after_ver != before_ver:
+                break
+    backup_note = f"saved to {backup.name}" if backup.is_dir() else "no existing config to back up"
+    extra: list[str] = []
     if rc == 3010:
-        lines.append("Windows restart required to finish driver setup.")
+        extra.append("Windows restart required to finish driver setup.")
     elif rc != 0:
-        log = _recent_windows_install_log(started)
-        if log:
-            lines.append(f"Installer log: {log}")
-    return rc, "\n".join(lines)
+        msi_log = _recent_windows_install_log(started)
+        if msi_log:
+            extra.append(f"MSI log: {msi_log}")
+        if log_text:
+            extra.append(log_text.splitlines()[-1])
+    report = _format_install_report(
+        package_name=setup.name,
+        before_ver=before_ver,
+        after_ver=after_ver,
+        rc=rc,
+        backup_note=backup_note,
+        service_text=service_status(),
+        extra_notes=extra,
+    )
+    return rc, report
 
 
 def download_and_verify_vigembus(*, cache_dir: Path = CACHE_DIR, progress_cb=None) -> Path:
@@ -854,12 +945,19 @@ def download_and_verify_vigembus(*, cache_dir: Path = CACHE_DIR, progress_cb=Non
 WIN_VIGEM_PS = r"""
 param([string]$Setup, [string]$Result, [switch]$Silent)
 $ErrorActionPreference = 'Continue'
-if ($Silent) {
-    $p = Start-Process -FilePath $Setup -ArgumentList @('/exenoui', '/qn', '/norestart') -Wait -PassThru
-} else {
-    $p = Start-Process -FilePath $Setup -Wait -PassThru
+function Write-Out([string]$path, [string]$text) {
+    [System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))
 }
-"$($p.ExitCode)" | Set-Content -LiteralPath $Result
+try {
+    if ($Silent) {
+        $p = Start-Process -FilePath $Setup -ArgumentList @('/exenoui', '/qn', '/norestart') -Wait -PassThru
+    } else {
+        $p = Start-Process -FilePath $Setup -Wait -PassThru
+    }
+    Write-Out $Result "$($p.ExitCode)"
+} catch {
+    Write-Out $Result "launch-failed $($_.Exception.Message)"
+}
 """
 
 
@@ -873,26 +971,33 @@ def install_vigembus(setup: Path, *, silent: bool = False) -> tuple[int, str]:
     work = Path(tempfile.mkdtemp(prefix="vibepollo-vigem-"))
     script, result = work / "install-vigem.ps1", work / "result.txt"
     script.write_text(WIN_VIGEM_PS, encoding="utf-8")
+    result.write_text("", encoding="utf-8")
     silent_flag = " -Silent" if silent else ""
     args = f'-NoProfile -ExecutionPolicy Bypass -File "{script}" -Setup "{setup}" -Result "{result}"{silent_flag}'
     cmd = ["powershell", "-NoProfile", "-Command",
            f"Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList {_ps_quote(args)}"]
-    r = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if not result.is_file():
+    r = subprocess.run(cmd, capture_output=True, text=True, check=False, **_NO_WINDOW_KW)
+    try:
+        text = result.read_text(encoding="utf-8", errors="replace").strip() if result.is_file() else ""
+    except OSError as exc:
         shutil.rmtree(work, ignore_errors=True)
-        return 1223, "Cancelled: Windows did not run the ViGEmBus installer (UAC declined?).\n" + (r.stderr or "").strip()
-    text = result.read_text(encoding="utf-8", errors="replace").strip()
+        return 1, f"Could not read elevated ViGEmBus installer result ({exc})."
     shutil.rmtree(work, ignore_errors=True)
+    if not text:
+        return 1223, "Cancelled: Windows did not run the ViGEmBus installer (UAC declined?).\n" + (r.stderr or "").strip()
+    if text.startswith("launch-failed"):
+        return 1, f"ViGEmBus installer failed to start: {text.removeprefix('launch-failed').strip()}"
     rc = int(text) if text.lstrip("-").isdigit() else 1
     after = vigembus_status()
     lines = [
-        f"ViGEmBus installer {setup.name} exited {rc}.",
-        f"ViGEmBus now: {after['summary']}",
+        "== ViGEmBus Summary ==",
+        f"  Installer : {setup.name} (exit {rc})",
+        f"  Status    : {after['summary']}",
     ]
     if rc == 3010:
-        lines.append("Windows restart required to finish ViGEmBus driver setup.")
+        lines.append("  Note      : Windows restart required to finish ViGEmBus driver setup.")
     if before.get("needs_update") and after.get("needs_update"):
-        lines.append("Note: upstream v1.22.0 in-place upgrades can require running the ViGEmBus installer a second time.")
+        lines.append("  Note      : upstream v1.22.0 in-place upgrades can require running setup a second time.")
     return rc, "\n".join(lines)
 
 
@@ -978,23 +1083,29 @@ def cli_check(as_json: bool = False) -> int:
     if as_json:
         print(json.dumps(payload, indent=2))
         return 0
-    print(f"Vibepollo Installed : {cur or 'NOT INSTALLED'} ({svc})")
+    print(f"Vibepollo Updater v{__version__}")
+    print("-" * 64)
+    print(f"  Installed : {cur or 'NOT INSTALLED'}  ({svc})")
     if vg is not None:
-        hint = "  (install: vibepollo-updater --install-vigembus)" if (not vg["installed"] or vg["needs_update"]) else ""
-        print(f"ViGEmBus Driver     : {vg['summary']}{hint}")
-    print(f"Upstream Repo       : https://github.com/{REPO}")
+        hint = "  [run --install-vigembus]" if (not vg["installed"] or vg["needs_update"]) else ""
+        print(f"  ViGEmBus  : {vg['summary']}{hint}")
+    print(f"  Upstream  : https://github.com/{REPO}")
+    print("-" * 64)
+    print("  Channels:")
     for key in CHANNELS:
         v = ch.get(key)
         if not v:
-            print(f"  {key:<10}: (no dedicated {key} release posted right now)")
+            print(f"    {key:<8}  (none posted)")
         else:
             sz = v["asset"]["size"] / (1024 * 1024)
-            caution = "  [OLDER THAN INSTALLED]" if release_is_downgrade(cur, v) else ""
+            act = plan_action(cur, v).upper()
             status = "pre-release" if v["prerelease"] else "stable"
-            print(f"  {key:<10}: {v['tag']:<12} [{status}]  ({v['published_at'][:10]}, {sz:.1f} MiB){caution}")
-    print("Older and specific versions: vibepollo-updater --list")
+            print(f"    {key:<8}  {v['tag']:<12}  {status:<11}  {v['published_at'][:10]}  {sz:5.1f} MiB  [{act}]")
     if cached:
-        print(f"Cached for rollback : {', '.join(cached)}")
+        print("-" * 64)
+        print(f"  Rollback cache : {', '.join(cached)}")
+    print("-" * 64)
+    print("  Tip: use --list for all releases, --update stable|latest to install.")
     return 0
 
 
@@ -1241,14 +1352,24 @@ def launch_gui(*, smoke_offscreen: bool = False) -> int:
             self.install_btn.setObjectName("PrimaryBtn")
             self.install_btn.setEnabled(False)
             self.install_btn.clicked.connect(self.start_install)
-            act.addWidget(self.install_btn, 2)
-
-            self.rollback_combo = QComboBox()
-            self.rollback_btn = QPushButton("Rollback Cached")
-            self.rollback_btn.clicked.connect(self.start_rollback)
-            act.addWidget(self.rollback_combo, 1)
-            act.addWidget(self.rollback_btn)
+            act.addWidget(self.install_btn, 1)
             lay.addLayout(act)
+
+            # Separate Rollback & Recovery card so Rollback is never confused with Update/Install
+            rb_box = QFrame()
+            rb_box.setObjectName("ChannelCard")
+            rbl = QVBoxLayout(rb_box)
+            rb_hdr = QLabel("ROLLBACK & RECOVERY (CACHED BUILDS)")
+            rb_hdr.setStyleSheet("color: #e8b84b; font-size: 11px; font-weight: 700;")
+            rbl.addWidget(rb_hdr)
+            rb_row = QHBoxLayout()
+            self.rollback_combo = QComboBox()
+            self.rollback_btn = QPushButton("Rollback Cached Build")
+            self.rollback_btn.clicked.connect(self.start_rollback)
+            rb_row.addWidget(self.rollback_combo, 1)
+            rb_row.addWidget(self.rollback_btn)
+            rbl.addLayout(rb_row)
+            lay.addWidget(rb_box)
 
             self.icon_chk = QCheckBox("Vibepollo icon on the Desktop")
             self.icon_chk.setVisible(not WINDOWS)   # Windows: upstream's installer makes its own shortcuts

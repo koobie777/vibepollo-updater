@@ -13,10 +13,14 @@ static class Engine
         string? best = null;
         var bestVer = new Version(0, 0);
         var exeDir = AppContext.BaseDirectory;
+        var portableScript = Path.Combine(exeDir, "vibepollo-updater");
+        var portablePy = Path.Combine(exeDir, "vibepollo-updater.py");
         var repoScript = Path.GetFullPath(Path.Combine(exeDir, "..", "..", "..", "vibepollo-updater"));
         foreach (var path in new[]
         {
             Environment.GetEnvironmentVariable("VIBEPOLLO_UPDATER"),
+            portableScript,
+            portablePy,
             repoScript,
             Path.Combine(home, "src", "vibepollo-updater", "vibepollo-updater"),
             Path.Combine(local, "vibepollo-updater", "bin", "vibepollo-updater.py"),

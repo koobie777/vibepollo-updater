@@ -2,6 +2,16 @@
 
 All notable changes to **vibepollo-updater** are documented in this file. Each version is also a [GitHub Release](https://github.com/koobie777/vibepollo-updater/releases). Update this file in the same commit as the version bump.
 
+## [1.5.0] — 2026-11-27
+### Fixed
+- **Windows update execution & config backup:** Exclude locked runtime `logs/` during pre-install config backup (with a core-file fallback if `robocopy` reports locked files) so an active `ApolloService` log no longer aborts updates before `VibepolloSetup.exe` launches.
+- **Elevated result file permissions:** Pre-create user-owned temp result/log files and write via `WriteAllText` instead of `Set-Content`, fixing `Access is denied` errors when reading the elevated installer exit code on Windows.
+
+### Changed
+- **Portable releases for Windows and Linux:** Ship self-contained portable archives (`vibepollo-updater-1.5.0-windows-portable.zip` and `vibepollo-updater-1.5.0-linux-portable.tar.gz`) that bundle the UI and Python engine side-by-side — unzip and run directly with no installer required.
+- **Cleaner UI & separate Rollback section:** Redesigned the WinUI 3 / Uno Skia window with structured status cards, visible `v1.5.0 · PORTABLE` version badge, a dedicated scrollable/copyable **Terminal Output** pane (never overwritten by release refreshes), and a visually separate **Rollback & Recovery** card below a divider so Rollback cannot be confused with Update.
+- **Cleaner CLI output:** Aligned channel summary tables, crisp dividers, and structured install/ViGEmBus completion summaries.
+
 ## [1.4.0] — 2026-11-26
 ### Added
 - **WinUI 3 + Uno Skia window** (`app/VibepolloUi`) for Windows and Linux. The Python CLI still does every download, SHA-256 check, and install.

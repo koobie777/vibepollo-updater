@@ -9,8 +9,9 @@
     <UnoFeatures>Skia;</UnoFeatures>
     <ApplicationTitle>Vibepollo Updater</ApplicationTitle>
     <ApplicationId>com.koobie777.vibepolloui</ApplicationId>
-    <ApplicationDisplayVersion>1.4.0</ApplicationDisplayVersion>
-    <ApplicationVersion>4</ApplicationVersion>
+    <ApplicationDisplayVersion>1.5.0</ApplicationDisplayVersion>
+    <ApplicationVersion>5</ApplicationVersion>
+    <Version>1.5.0</Version>
     <ApplicationPublisher>koobie777</ApplicationPublisher>
     <Description>Unofficial Vibepollo installer. WinUI 3 on Windows, Uno Skia on Linux. The Python CLI still installs.</Description>
     <DefineConstants Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'windows'">$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>

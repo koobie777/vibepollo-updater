@@ -367,6 +367,25 @@ class VibepolloUpdaterTests(unittest.TestCase):
                 with self.assertRaises(FileNotFoundError):
                     m.vibepollo_desktop_icon("on", src=Path(td) / "missing.desktop", dst=dst)
 
+    def test_windows_install_ps_excludes_locked_logs_and_preserves_acl(self) -> None:
+        m = _load_mod()
+        self.assertIn("/XD logs", m.WIN_INSTALL_PS)
+        self.assertIn("WriteAllText", m.WIN_INSTALL_PS)
+        self.assertNotIn("Set-Content", m.WIN_INSTALL_PS)
+        self.assertIn("WriteAllText", m.WIN_VIGEM_PS)
+        self.assertNotIn("Set-Content", m.WIN_VIGEM_PS)
+        report = m._format_install_report(
+            package_name="VibepolloSetup-2.23.4.exe",
+            before_ver="2.23.1",
+            after_ver="2.23.4",
+            rc=0,
+            backup_note="saved to 20261127-114000",
+            service_text="ApolloService=running",
+        )
+        self.assertIn("== Install Summary ==", report)
+        self.assertIn("2.23.1 -> 2.23.4", report)
+        self.assertIn("exit 0 (success)", report)
+
 
 if __name__ == "__main__":
     unittest.main()
